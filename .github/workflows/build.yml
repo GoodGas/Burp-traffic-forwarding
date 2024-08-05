@@ -1,10 +1,7 @@
 name: Build Burp Extension
 
 on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
+  workflow_dispatch:  # 添加手动触发选项
 
 jobs:
   build:
