@@ -2,107 +2,141 @@ package burp;
 
 import javax.swing.*;
 import java.awt.*;
-import java.io.PrintWriter;
-import java.net.HttpURLConnection;
-import java.net.URL;
-import java.io.OutputStream;
-import java.util.regex.Pattern;
+import java.util.ArrayList;
+import java.util.List;
 
-public class BurpExtender implements IBurpExtender, ITab, IHttpListener {
-
-    private IExtensionHelpers helpers;
-    private PrintWriter stdout;
-    private JPanel mainPanel;
-    private JTextField forwardUrlField;
-    private JTextField regexField;
+public class BurpExtender implements IBurpExtender, ITab, IProxyListener {
     private IBurpExtenderCallbacks callbacks;
+    private IExtensionHelpers helpers;
+    private JPanel mainPanel;
+    private JTextField serverIpField;
+    private JTextField serverPortField;
+    private JTextArea whitelistArea;
+    private JTextArea blacklistArea;
+    private JButton applyButton;
+    
+    private String forwardingIp;
+    private int forwardingPort;
+    private List<String> whitelist;
+    private List<String> blacklist;
 
     @Override
     public void registerExtenderCallbacks(IBurpExtenderCallbacks callbacks) {
         this.callbacks = callbacks;
         this.helpers = callbacks.getHelpers();
-        callbacks.setExtensionName("Request/Response Forwarder");
-        this.stdout = new PrintWriter(callbacks.getStdout(), true);
-        callbacks.registerHttpListener(this);
-        
-        SwingUtilities.invokeLater(new Runnable() {
-            @Override
-            public void run() {
-                mainPanel = new JPanel();
-                mainPanel.setLayout(new BoxLayout(mainPanel, BoxLayout.Y_AXIS));
-                
-                JLabel forwardLabel = new JLabel("Forward URL:");
-                forwardUrlField = new JTextField(20);
-                forwardUrlField.setText("http://example.com/forward");
-                
-                JLabel regexLabel = new JLabel("URL Regex Pattern:");
-                regexField = new JTextField(20);
-                regexField.setText(".*");  // 默认匹配所有URL
-                
-                mainPanel.add(forwardLabel);
-                mainPanel.add(forwardUrlField);
-                mainPanel.add(regexLabel);
-                mainPanel.add(regexField);
-                
-                callbacks.addSuiteTab(BurpExtender.this);
-            }
-        });
 
-        stdout.println("Request/Response Forwarder插件加载成功!");
+        SwingUtilities.invokeLater(this::buildUI);
+
+        callbacks.setExtensionName("Forwarding Config");
+        callbacks.addSuiteTab(this);
+        callbacks.registerProxyListener(this);
+    }
+
+    private void buildUI() {
+        mainPanel = new JPanel(new GridBagLayout());
+        GridBagConstraints gbc = new GridBagConstraints();
+        gbc.insets = new Insets(5, 5, 5, 5);
+        gbc.anchor = GridBagConstraints.WEST;
+
+        // Server IP and Port
+        gbc.gridx = 0;
+        gbc.gridy = 0;
+        mainPanel.add(new JLabel("Forwarding Server IP:"), gbc);
+
+        gbc.gridx = 1;
+        serverIpField = new JTextField(15);
+        mainPanel.add(serverIpField, gbc);
+
+        gbc.gridx = 0;
+        gbc.gridy = 1;
+        mainPanel.add(new JLabel("Forwarding Server Port:"), gbc);
+
+        gbc.gridx = 1;
+        serverPortField = new JTextField(5);
+        mainPanel.add(serverPortField, gbc);
+
+        // Whitelist and Blacklist
+        gbc.gridx = 0;
+        gbc.gridy = 2;
+        gbc.gridwidth = 2;
+        mainPanel.add(new JLabel("Whitelist (one domain per line):"), gbc);
+
+        gbc.gridy = 3;
+        whitelistArea = new JTextArea(10, 30);
+        JScrollPane whitelistScroll = new JScrollPane(whitelistArea);
+        mainPanel.add(whitelistScroll, gbc);
+
+        gbc.gridy = 4;
+        mainPanel.add(new JLabel("Blacklist (one domain per line):"), gbc);
+
+        gbc.gridy = 5;
+        blacklistArea = new JTextArea(10, 30);
+        JScrollPane blacklistScroll = new JScrollPane(blacklistArea);
+        mainPanel.add(blacklistScroll, gbc);
+
+        // Apply button
+        gbc.gridy = 6;
+        gbc.gridwidth = 2;
+        gbc.anchor = GridBagConstraints.CENTER;
+        applyButton = new JButton("Apply");
+        mainPanel.add(applyButton, gbc);
+
+        // Add action listener to the apply button
+        applyButton.addActionListener(e -> applyConfiguration());
+    }
+
+    private void applyConfiguration() {
+        forwardingIp = serverIpField.getText().trim();
+        try {
+            forwardingPort = Integer.parseInt(serverPortField.getText().trim());
+            if (forwardingPort < 1 || forwardingPort > 65535) {
+                throw new NumberFormatException();
+            }
+        } catch (NumberFormatException e) {
+            JOptionPane.showMessageDialog(mainPanel, "Invalid port number. Please enter a number between 1 and 65535.");
+            return;
+        }
+
+        whitelist = new ArrayList<>(List.of(whitelistArea.getText().split("\n")));
+        blacklist = new ArrayList<>(List.of(blacklistArea.getText().split("\n")));
+
+        // Remove empty entries
+        whitelist.removeIf(String::isEmpty);
+        blacklist.removeIf(String::isEmpty);
+
+        JOptionPane.showMessageDialog(mainPanel, "Forwarding configuration applied successfully!");
+    }
+
+    @Override
+    public void processProxyMessage(boolean messageIsRequest, IInterceptedProxyMessage message) {
+        if (forwardingIp == null || forwardingIp.isEmpty()) {
+            return; // No forwarding configured
+        }
+
+        IHttpRequestResponse messageInfo = message.getMessageInfo();
+        IHttpService originalService = messageInfo.getHttpService();
+        String host = originalService.getHost();
+
+        // Check if the host is in the whitelist or blacklist
+        boolean shouldForward = whitelist.isEmpty() || whitelist.stream().anyMatch(host::contains);
+        boolean isBlacklisted = blacklist.stream().anyMatch(host::contains);
+
+        if (shouldForward && !isBlacklisted) {
+            // Create a new HTTP service with the forwarding server details
+            IHttpService forwardingService = helpers.buildHttpService(forwardingIp, forwardingPort, originalService.getProtocol());
+
+            // Update the message with the new service
+            messageInfo.setHttpService(forwardingService);
+        }
     }
 
     @Override
     public String getTabCaption() {
-        return "Forwarder";
+        return "Forwarding Config";
     }
 
     @Override
     public Component getUiComponent() {
         return mainPanel;
-    }
-
-    @Override
-    public void processHttpMessage(int toolFlag, boolean messageIsRequest, IHttpRequestResponse messageInfo) {
-        IRequestInfo requestInfo = helpers.analyzeRequest(messageInfo);
-        String url = requestInfo.getUrl().toString();
-        
-        if (matchesRegex(url)) {
-            if (messageIsRequest) {
-                byte[] request = messageInfo.getRequest();
-                forwardMessage(request, true, url);
-            } else {
-                byte[] response = messageInfo.getResponse();
-                forwardMessage(response, false, url);
-            }
-        }
-    }
-
-    private boolean matchesRegex(String url) {
-        String regex = regexField.getText();
-        return Pattern.matches(regex, url);
-    }
-
-    private void forwardMessage(byte[] message, boolean isRequest, String originalUrl) {
-        try {
-            String forwardUrl = forwardUrlField.getText();
-            URL url = new URL(forwardUrl);
-            HttpURLConnection con = (HttpURLConnection) url.openConnection();
-            con.setRequestMethod("POST");
-            con.setDoOutput(true);
-            
-            con.setRequestProperty("X-Message-Type", isRequest ? "Request" : "Response");
-            con.setRequestProperty("X-Original-URL", originalUrl);
-
-            try(OutputStream os = con.getOutputStream()) {
-                os.write(message);
-            }
-
-            int responseCode = con.getResponseCode();
-            stdout.println("转发" + (isRequest ? "请求" : "响应") + "到 " + forwardUrl + 
-                           "，原始URL: " + originalUrl + "，响应代码: " + responseCode);
-
-        } catch (Exception e) {
-            stdout.println("转发失败: " + e.getMessage());
-        }
     }
 }
