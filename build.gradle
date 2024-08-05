@@ -11,6 +11,9 @@ dependencies {
 }
 
 jar {
+    archiveBaseName = 'burp-extension'
+    archiveVersion = '1.0.0'
+    
     from {
         configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
     }
