@@ -25,10 +25,17 @@ public class BurpExtender implements IBurpExtender, ITab, IProxyListener {
         this.callbacks = callbacks;
         this.helpers = callbacks.getHelpers();
 
-        SwingUtilities.invokeLater(this::buildUI);
-
+        // 设置扩展名称
         callbacks.setExtensionName("Forwarding Config");
-        callbacks.addSuiteTab(this);
+
+        // 初始化UI
+        SwingUtilities.invokeLater(() -> {
+            buildUI();
+            // 在UI构建完成后添加标签
+            callbacks.addSuiteTab(BurpExtender.this);
+        });
+
+        // 注册代理监听器
         callbacks.registerProxyListener(this);
     }
 
