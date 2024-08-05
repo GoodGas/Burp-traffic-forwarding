@@ -4,8 +4,9 @@ import javax.swing.*;
 import java.awt.*;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.stream.Collectors;
 
-public class BurpExtender implements IBurpExtender, ITab, IProxyListener {
+public class BurpExtender implements IBurpExtender, ITab, IHttpListener {
     private IBurpExtenderCallbacks callbacks;
     private IExtensionHelpers helpers;
     private JPanel mainPanel;
@@ -35,8 +36,12 @@ public class BurpExtender implements IBurpExtender, ITab, IProxyListener {
             callbacks.addSuiteTab(BurpExtender.this);
         });
 
-        // 注册代理监听器
-        callbacks.registerProxyListener(this);
+        // 初始化列表
+        whitelist = new ArrayList<>();
+        blacklist = new ArrayList<>();
+
+        // 注册HTTP监听器
+        callbacks.registerHttpListener(this);
     }
 
     private void buildUI() {
@@ -93,47 +98,74 @@ public class BurpExtender implements IBurpExtender, ITab, IProxyListener {
     }
 
     private void applyConfiguration() {
+        // Get and validate the forwarding IP
         forwardingIp = serverIpField.getText().trim();
-        try {
-            forwardingPort = Integer.parseInt(serverPortField.getText().trim());
-            if (forwardingPort < 1 || forwardingPort > 65535) {
-                throw new NumberFormatException();
-            }
-        } catch (NumberFormatException e) {
-            JOptionPane.showMessageDialog(mainPanel, "Invalid port number. Please enter a number between 1 and 65535.");
+        if (forwardingIp.isEmpty()) {
+            JOptionPane.showMessageDialog(mainPanel, "Please enter a valid forwarding IP address.");
             return;
         }
 
-        whitelist = new ArrayList<>(List.of(whitelistArea.getText().split("\n")));
-        blacklist = new ArrayList<>(List.of(blacklistArea.getText().split("\n")));
+        // Get and validate the forwarding port
+        try {
+            forwardingPort = Integer.parseInt(serverPortField.getText().trim());
+            if (forwardingPort <= 0 || forwardingPort > 65535) {
+                throw new NumberFormatException();
+            }
+        } catch (NumberFormatException e) {
+            JOptionPane.showMessageDialog(mainPanel, "Please enter a valid port number (1-65535).");
+            return;
+        }
 
-        // Remove empty entries
-        whitelist.removeIf(String::isEmpty);
-        blacklist.removeIf(String::isEmpty);
+        // Update whitelist and blacklist
+        whitelist = whitelistArea.getText().lines().filter(s -> !s.trim().isEmpty()).collect(Collectors.toList());
+        blacklist = blacklistArea.getText().lines().filter(s -> !s.trim().isEmpty()).collect(Collectors.toList());
 
-        JOptionPane.showMessageDialog(mainPanel, "Forwarding configuration applied successfully!");
+        JOptionPane.showMessageDialog(mainPanel, "Configuration applied successfully!");
     }
 
     @Override
-    public void processProxyMessage(boolean messageIsRequest, IInterceptedProxyMessage message) {
-        if (forwardingIp == null || forwardingIp.isEmpty()) {
-            return; // No forwarding configured
+    public void processHttpMessage(int toolFlag, boolean messageIsRequest, IHttpRequestResponse messageInfo) {
+        // 只处理来自 Proxy 工具的请求
+        if (toolFlag != IBurpExtenderCallbacks.TOOL_PROXY) {
+            return;
         }
 
-        IHttpRequestResponse messageInfo = message.getMessageInfo();
+        if (forwardingIp == null || forwardingIp.isEmpty()) {
+            return; // 没有配置转发
+        }
+
         IHttpService originalService = messageInfo.getHttpService();
         String host = originalService.getHost();
 
-        // Check if the host is in the whitelist or blacklist
+        // 检查主机是否在白名单或黑名单中
         boolean shouldForward = whitelist.isEmpty() || whitelist.stream().anyMatch(host::contains);
         boolean isBlacklisted = blacklist.stream().anyMatch(host::contains);
 
         if (shouldForward && !isBlacklisted) {
-            // Create a new HTTP service with the forwarding server details
+            // 创建一个新的 HTTP 服务，使用转发服务器的详细信息
             IHttpService forwardingService = helpers.buildHttpService(forwardingIp, forwardingPort, originalService.getProtocol());
 
-            // Update the message with the new service
+            // 更新消息的服务
             messageInfo.setHttpService(forwardingService);
+
+            // 如果是请求，我们需要修改 Host 头
+            if (messageIsRequest) {
+                byte[] request = messageInfo.getRequest();
+                IRequestInfo requestInfo = helpers.analyzeRequest(request);
+                List<String> headers = requestInfo.getHeaders();
+
+                // 修改或添加 Host 头
+                headers.removeIf(header -> header.toLowerCase().startsWith("host:"));
+                headers.add("Host: " + forwardingIp);
+
+                // 重建请求
+                byte[] body = request.clone();
+                body = new String(body).substring(requestInfo.getBodyOffset()).getBytes();
+                byte[] newRequest = helpers.buildHttpMessage(headers, body);
+
+                // 设置修改后的请求
+                messageInfo.setRequest(newRequest);
+            }
         }
     }
 
