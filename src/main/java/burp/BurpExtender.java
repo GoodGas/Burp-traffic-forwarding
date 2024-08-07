@@ -1,7 +1,6 @@
 package burp;
 
 import javax.swing.*;
-import javax.swing.table.DefaultTableModel;
 import java.awt.*;
 import java.io.*;
 import java.net.InetSocketAddress;
@@ -17,21 +16,21 @@ public class BurpExtender implements IBurpExtender, IHttpListener, ITab {
     private JPanel mainPanel;
     private JTextField serverIpField;
     private JTextField serverPortField;
-    private JButton testConnectionButton;
-    private JButton startButton;
+    private JTextArea blacklistArea;
+    private JTextField domainFilterField;
+    private JTextField methodFilterField;
+    private JTextField statusCodeFilterField;
+    private JTextField ipFilterField;
+    private JButton applyButton;
     private JButton stopButton;
-    private JButton addRuleButton;
-    private JButton deleteRuleButton;
-    private JButton saveConfigButton;
+    private JButton testConnectionButton;
     private JButton exportConfigButton;
     private JButton importConfigButton;
-    private JTable ruleTable;
-    private DefaultTableModel ruleTableModel;
     private String forwardingIp;
     private int forwardingPort;
     private ExecutorService executorService;
     private boolean isRunning = false;
-    private List<Rule> rules;
+    private Set<String> blacklist;
     private Properties config;
     private static final String CONFIG_FILE = "logger_forwarder_config.properties";
     private BlockingQueue<String> logQueue;
@@ -54,70 +53,108 @@ public class BurpExtender implements IBurpExtender, IHttpListener, ITab {
     }
 
     private void buildUI() {
-        mainPanel = new JPanel(new BorderLayout());
+        mainPanel = new JPanel(new GridBagLayout());
+        GridBagConstraints gbc = new GridBagConstraints();
+        gbc.insets = new Insets(5, 5, 5, 5);
+        gbc.anchor = GridBagConstraints.WEST;
 
-        // 顶部面板
-        JPanel topPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
-        topPanel.add(new JLabel("转发服务器 IP:"));
+        gbc.gridx = 0;
+        gbc.gridy = 0;
+        mainPanel.add(new JLabel("转发服务器 IP:"), gbc);
+
+        gbc.gridx = 1;
         serverIpField = new JTextField(15);
         serverIpField.setText(config.getProperty("forwardingIp", ""));
-        topPanel.add(serverIpField);
+        mainPanel.add(serverIpField, gbc);
 
-        topPanel.add(new JLabel("端口:"));
+        gbc.gridx = 0;
+        gbc.gridy = 1;
+        mainPanel.add(new JLabel("转发服务器端口:"), gbc);
+
+        gbc.gridx = 1;
         serverPortField = new JTextField(5);
         serverPortField.setText(config.getProperty("forwardingPort", ""));
-        topPanel.add(serverPortField);
+        mainPanel.add(serverPortField, gbc);
 
-        testConnectionButton = new JButton("测试连接");
-        topPanel.add(testConnectionButton);
+        gbc.gridx = 0;
+        gbc.gridy = 2;
+        gbc.gridwidth = 2;
+        mainPanel.add(new JLabel("黑名单扩展名 (逗号分隔):"), gbc);
 
-        startButton = new JButton("开始连接");
-        topPanel.add(startButton);
+        gbc.gridy = 3;
+        gbc.fill = GridBagConstraints.BOTH;
+        blacklistArea = new JTextArea(5, 20);
+        blacklistArea.setLineWrap(true);
+        blacklistArea.setText(config.getProperty("blacklist", ""));
+        JScrollPane scrollPane = new JScrollPane(blacklistArea);
+        mainPanel.add(scrollPane, gbc);
 
-        stopButton = new JButton("停止连接");
+        gbc.gridy = 4;
+        gbc.gridwidth = 1;
+        gbc.fill = GridBagConstraints.NONE;
+        mainPanel.add(new JLabel("域名过滤 (正则表达式):"), gbc);
+
+        gbc.gridx = 1;
+        domainFilterField = new JTextField(15);
+        domainFilterField.setText(config.getProperty("domainFilter", ""));
+        mainPanel.add(domainFilterField, gbc);
+
+        gbc.gridx = 0;
+        gbc.gridy = 5;
+        mainPanel.add(new JLabel("HTTP 方法过滤 (逗号分隔):"), gbc);
+
+        gbc.gridx = 1;
+        methodFilterField = new JTextField(15);
+        methodFilterField.setText(config.getProperty("methodFilter", ""));
+        mainPanel.add(methodFilterField, gbc);
+
+        gbc.gridx = 0;
+        gbc.gridy = 6;
+        mainPanel.add(new JLabel("状态码过滤 (逗号分隔):"), gbc);
+
+        gbc.gridx = 1;
+        statusCodeFilterField = new JTextField(15);
+        statusCodeFilterField.setText(config.getProperty("statusCodeFilter", ""));
+        mainPanel.add(statusCodeFilterField, gbc);
+
+        gbc.gridx = 0;
+        gbc.gridy = 7;
+        mainPanel.add(new JLabel("IP 过滤 (逗号分隔):"), gbc);
+
+        gbc.gridx = 1;
+        ipFilterField = new JTextField(15);
+        ipFilterField.setText(config.getProperty("ipFilter", ""));
+        mainPanel.add(ipFilterField, gbc);
+
+        gbc.gridx = 0;
+        gbc.gridy = 8;
+        applyButton = new JButton("开始记录");
+        mainPanel.add(applyButton, gbc);
+
+        gbc.gridx = 1;
+        stopButton = new JButton("停止记录");
         stopButton.setEnabled(false);
-        topPanel.add(stopButton);
+        mainPanel.add(stopButton, gbc);
 
-        mainPanel.add(topPanel, BorderLayout.NORTH);
+        gbc.gridx = 0;
+        gbc.gridy = 9;
+        testConnectionButton = new JButton("测试连接");
+        mainPanel.add(testConnectionButton, gbc);
 
-        // 中间规则表
-        String[] columnNames = {"序号", "过滤方法", "过滤规则", "规则状态", "规则备注"};
-        ruleTableModel = new DefaultTableModel(columnNames, 0);
-        ruleTable = new JTable(ruleTableModel);
-        JScrollPane scrollPane = new JScrollPane(ruleTable);
-        mainPanel.add(scrollPane, BorderLayout.CENTER);
-
-        // 底部按钮面板
-        JPanel bottomPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
-        addRuleButton = new JButton("添加规则");
-        bottomPanel.add(addRuleButton);
-
-        deleteRuleButton = new JButton("删除规则");
-        bottomPanel.add(deleteRuleButton);
-
-        saveConfigButton = new JButton("保存配置");
-        bottomPanel.add(saveConfigButton);
-
+        gbc.gridx = 0;
+        gbc.gridy = 10;
         exportConfigButton = new JButton("导出配置");
-        bottomPanel.add(exportConfigButton);
+        mainPanel.add(exportConfigButton, gbc);
 
+        gbc.gridx = 1;
         importConfigButton = new JButton("导入配置");
-        bottomPanel.add(importConfigButton);
+        mainPanel.add(importConfigButton, gbc);
 
-        mainPanel.add(bottomPanel, BorderLayout.SOUTH);
-
-        // 添加事件监听器
-        testConnectionButton.addActionListener(e -> testConnection());
-        startButton.addActionListener(e -> startLogging());
+        applyButton.addActionListener(e -> startLogging());
         stopButton.addActionListener(e -> stopLogging());
-        addRuleButton.addActionListener(e -> addRule());
-        deleteRuleButton.addActionListener(e -> deleteRule());
-        saveConfigButton.addActionListener(e -> saveConfig());
+        testConnectionButton.addActionListener(e -> testConnection());
         exportConfigButton.addActionListener(e -> exportConfig());
         importConfigButton.addActionListener(e -> importConfig());
-
-        // 加载已保存的规则
-        loadRules();
     }
 
     private void loadConfig() {
@@ -127,92 +164,21 @@ public class BurpExtender implements IBurpExtender, IHttpListener, ITab {
         } catch (IOException e) {
             callbacks.printError("无法加载配置文件: " + e.getMessage());
         }
-        rules = new ArrayList<>();
     }
 
     private void saveConfig() {
         config.setProperty("forwardingIp", forwardingIp);
         config.setProperty("forwardingPort", String.valueOf(forwardingPort));
-
-        // 保存规则
-        StringBuilder rulesStr = new StringBuilder();
-        for (Rule rule : rules) {
-            rulesStr.append(rule.toString()).append(";");
-        }
-        config.setProperty("rules", rulesStr.toString());
+        config.setProperty("blacklist", blacklistArea.getText());
+        config.setProperty("domainFilter", domainFilterField.getText());
+        config.setProperty("methodFilter", methodFilterField.getText());
+        config.setProperty("statusCodeFilter", statusCodeFilterField.getText());
+        config.setProperty("ipFilter", ipFilterField.getText());
 
         try (FileOutputStream out = new FileOutputStream(CONFIG_FILE)) {
             config.store(out, "日志记录和转发器配置");
-            JOptionPane.showMessageDialog(mainPanel, "配置已成功保存！");
         } catch (IOException e) {
             callbacks.printError("无法保存配置文件: " + e.getMessage());
-            JOptionPane.showMessageDialog(mainPanel, "保存配置失败: " + e.getMessage());
-        }
-    }
-
-    private void loadRules() {
-        String rulesStr = config.getProperty("rules", "");
-        String[] ruleStrings = rulesStr.split(";");
-        for (String ruleStr : ruleStrings) {
-            if (!ruleStr.isEmpty()) {
-                Rule rule = Rule.fromString(ruleStr);
-                rules.add(rule);
-                addRuleToTable(rule);
-            }
-        }
-    }
-
-    private void addRuleToTable(Rule rule) {
-        ruleTableModel.addRow(new Object[]{
-                ruleTableModel.getRowCount() + 1,
-                rule.getFilterType(),
-                rule.getFilterRule(),
-                rule.isEnabled() ? "Open" : "Closed",
-                rule.getComment()
-        });
-    }
-
-    private void addRule() {
-        String[] filterTypes = {"黑名单扩展名", "域名过滤", "HTTP方法过滤", "状态码过滤", "IP过滤"};
-        JComboBox<String> filterTypeCombo = new JComboBox<>(filterTypes);
-        JTextField filterRuleField = new JTextField(20);
-        JCheckBox enabledCheckBox = new JCheckBox("启用", true);
-        JTextField commentField = new JTextField(20);
-
-        JPanel panel = new JPanel(new GridLayout(0, 1));
-        panel.add(new JLabel("过滤方法:"));
-        panel.add(filterTypeCombo);
-        panel.add(new JLabel("过滤规则:"));
-        panel.add(filterRuleField);
-        panel.add(enabledCheckBox);
-        panel.add(new JLabel("规则备注:"));
-        panel.add(commentField);
-
-        int result = JOptionPane.showConfirmDialog(mainPanel, panel, "添加规则",
-                JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
-        if (result == JOptionPane.OK_OPTION) {
-            Rule rule = new Rule(
-                (String) filterTypeCombo.getSelectedItem(),
-                filterRuleField.getText(),
-                enabledCheckBox.isSelected(),
-                commentField.getText()
-            );
-            rules.add(rule);
-            addRuleToTable(rule);
-        }
-    }
-
-    private void deleteRule() {
-        int selectedRow = ruleTable.getSelectedRow();
-        if (selectedRow != -1) {
-            rules.remove(selectedRow);
-            ruleTableModel.removeRow(selectedRow);
-            // 更新序号
-            for (int i = 0; i < ruleTableModel.getRowCount(); i++) {
-                ruleTableModel.setValueAt(i + 1, i, 0);
-            }
-        } else {
-            JOptionPane.showMessageDialog(mainPanel, "请选择要删除的规则。");
         }
     }
 
@@ -233,6 +199,7 @@ public class BurpExtender implements IBurpExtender, IHttpListener, ITab {
             return;
         }
 
+        updateBlacklist();
         saveConfig();
 
         logQueue = new LinkedBlockingQueue<>(1000);
@@ -241,7 +208,7 @@ public class BurpExtender implements IBurpExtender, IHttpListener, ITab {
         scheduledExecutorService.scheduleAtFixedRate(this::sendLogs, 0, 5, TimeUnit.SECONDS);
 
         isRunning = true;
-        startButton.setEnabled(false);
+        applyButton.setEnabled(false);
         stopButton.setEnabled(true);
         JOptionPane.showMessageDialog(mainPanel, "日志记录已成功启动！");
     }
@@ -261,66 +228,123 @@ public class BurpExtender implements IBurpExtender, IHttpListener, ITab {
         if (scheduledExecutorService != null) {
             scheduledExecutorService.shutdown();
         }
-        startButton.setEnabled(true);
+        applyButton.setEnabled(true);
         stopButton.setEnabled(false);
         JOptionPane.showMessageDialog(mainPanel, "日志记录已成功停止！");
     }
 
-    @Override
-    public void processHttpMessage(int toolFlag, boolean messageIsRequest, IHttpRequestResponse messageInfo) {
-        if (!isRunning) return;
+    private void updateBlacklist() {
+        blacklist = new HashSet<>();
+        String[] extensions = blacklistArea.getText().split(",");
+        for (String ext : extensions) {
+            ext = ext.trim().toLowerCase();
+            if (!ext.isEmpty()) {
+                if (!ext.startsWith(".")) {
+                    ext = "." + ext;
+                }
+                blacklist.add(ext);
+            }
+        }
+    }
 
-        executorService.submit(() -> {
-            try {
-                IRequestInfo requestInfo = helpers.analyzeRequest(messageInfo);
-                IResponseInfo responseInfo = messageIsRequest ? null : helpers.analyzeResponse(messageInfo.getResponse());
-                String url = requestInfo.getUrl().toString().toLowerCase();
-                
-                for (Rule rule : rules) {
-                    if (!rule.isEnabled()) continue;
+@Override
+public void processHttpMessage(int toolFlag, boolean messageIsRequest, IHttpRequestResponse messageInfo) {
+    if (!isRunning) return;
 
-                    switch (rule.getFilterType()) {
-                        case "黑名单扩展名":
-                            if (url.endsWith(rule.getFilterRule().toLowerCase())) return;
-                            break;
-                        case "域名过滤":
-                            if (!url.matches(rule.getFilterRule())) return;
-                            break;
-                        case "HTTP方法过滤":
-                            if (!requestInfo.getMethod().equalsIgnoreCase(rule.getFilterRule())) return;
-                            break;
-                        case "状态码过滤":
-                            if (!messageIsRequest && responseInfo.getStatusCode() != Integer.parseInt(rule.getFilterRule())) return;
-                            break;
-                        case "IP过滤":
-                            if (!requestInfo.getUrl().getHost().equals(rule.getFilterRule())) return;
-                            break;
+    executorService.submit(() -> {
+        try {
+            IRequestInfo requestInfo = helpers.analyzeRequest(messageInfo);
+            IResponseInfo responseInfo = messageIsRequest ? null : helpers.analyzeResponse(messageInfo.getResponse());
+            String url = requestInfo.getUrl().toString().toLowerCase();
+            
+            // 扩展名过滤
+            for (String ext : blacklist) {
+                if (url.endsWith(ext)) {
+                    return;
+                }
+            }
+            
+            // 域名过滤
+            String domainFilter = domainFilterField.getText().trim();
+            if (!domainFilter.isEmpty() && !url.matches(domainFilter)) {
+                return;
+            }
+            
+            // HTTP方法过滤
+            String methodFilter = methodFilterField.getText().trim();
+            if (!methodFilter.isEmpty()) {
+                String[] methods = methodFilter.split(",");
+                boolean methodMatch = false;
+                for (String method : methods) {
+                    if (requestInfo.getMethod().equalsIgnoreCase(method.trim())) {
+                        methodMatch = true;
+                        break;
                     }
                 }
-
-                String toolName = callbacks.getToolName(toolFlag);
-                String messageType = messageIsRequest ? "请求" : "响应";
-                String timestamp = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS").format(new Date());
-
-                StringBuilder logMessage = new StringBuilder();
-                logMessage.append(String.format("[%s] [%s] [%s]\n", timestamp, toolName, messageType));
-                logMessage.append(String.format("URL: %s\n", requestInfo.getUrl()));
-                logMessage.append(String.format("方法: %s\n", requestInfo.getMethod()));
-
-                if (!messageIsRequest) {
-                    logMessage.append(String.format("状态码: %d\n", responseInfo.getStatusCode()));
+                if (!methodMatch) {
+                    return;
                 }
-
-                byte[] message = messageIsRequest ? messageInfo.getRequest() : messageInfo.getResponse();
-                logMessage.append(new String(message));
-                logMessage.append("\n\n");
-
-                logQueue.offer(logMessage.toString());
-            } catch (Exception e) {
-                callbacks.printError("处理 HTTP 消息时出错: " + e.getMessage());
             }
-        });
-    }
+            
+            // IP过滤
+            String ipFilter = ipFilterField.getText().trim();
+            if (!ipFilter.isEmpty()) {
+                String host = requestInfo.getUrl().getHost();
+                String[] ips = ipFilter.split(",");
+                boolean ipMatch = false;
+                for (String ip : ips) {
+                    if (host.equals(ip.trim())) {
+                        ipMatch = true;
+                        break;
+                    }
+                }
+                if (!ipMatch) {
+                    return;
+                }
+            }
+
+            // 状态码过滤
+            if (!messageIsRequest) {
+                String statusCodeFilter = statusCodeFilterField.getText().trim();
+                if (!statusCodeFilter.isEmpty()) {
+                    String[] statusCodes = statusCodeFilter.split(",");
+                    boolean statusCodeMatch = false;
+                    for (String statusCode : statusCodes) {
+                        if (String.valueOf(responseInfo.getStatusCode()).equals(statusCode.trim())) {
+                            statusCodeMatch = true;
+                            break;
+                        }
+                    }
+                    if (!statusCodeMatch) {
+                        return;
+                    }
+                }
+            }
+
+            String toolName = callbacks.getToolName(toolFlag);
+            String messageType = messageIsRequest ? "请求" : "响应";
+            String timestamp = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS").format(new Date());
+
+            StringBuilder logMessage = new StringBuilder();
+            logMessage.append(String.format("[%s] [%s] [%s]\n", timestamp, toolName, messageType));
+
+            logMessage.append(String.format("URL: %s\n", requestInfo.getUrl()));
+            logMessage.append(String.format("方法: %s\n", requestInfo.getMethod()));
+
+            if (!messageIsRequest) {
+                logMessage.append(String.format("状态码: %d\n", responseInfo.getStatusCode()));
+            }
+
+            byte[] message = messageIsRequest ? messageInfo.getRequest() : messageInfo.getResponse();
+            logMessage.append(new String(message));
+            logMessage.append("\n\n");
+
+            logQueue.offer(logMessage.toString());
+        } catch (Exception e) {
+            callbacks.printError("处理 HTTP 消息时出错: " + e.getMessage());
+        }
+    });
+}
 
     private void sendLogs() {
         List<String> logs = new ArrayList<>();
@@ -398,13 +422,11 @@ public class BurpExtender implements IBurpExtender, IHttpListener, ITab {
     private void updateUIFromConfig() {
         serverIpField.setText(config.getProperty("forwardingIp", ""));
         serverPortField.setText(config.getProperty("forwardingPort", ""));
-
-        // 清空规则表
-        ruleTableModel.setRowCount(0);
-        rules.clear();
-
-        // 重新加载规则
-        loadRules();
+        blacklistArea.setText(config.getProperty("blacklist", ""));
+        domainFilterField.setText(config.getProperty("domainFilter", ""));
+        methodFilterField.setText(config.getProperty("methodFilter", ""));
+        statusCodeFilterField.setText(config.getProperty("statusCodeFilter", ""));
+        ipFilterField.setText(config.getProperty("ipFilter", ""));
     }
 
     @Override
@@ -415,45 +437,5 @@ public class BurpExtender implements IBurpExtender, IHttpListener, ITab {
     @Override
     public Component getUiComponent() {
         return mainPanel;
-    }
-
-    private static class Rule {
-        private String filterType;
-        private String filterRule;
-        private boolean enabled;
-        private String comment;
-
-        public Rule(String filterType, String filterRule, boolean enabled, String comment) {
-            this.filterType = filterType;
-            this.filterRule = filterRule;
-            this.enabled = enabled;
-            this.comment = comment;
-        }
-
-        public String getFilterType() {
-            return filterType;
-        }
-
-        public String getFilterRule() {
-            return filterRule;
-        }
-
-        public boolean isEnabled() {
-            return enabled;
-        }
-
-        public String getComment() {
-            return comment;
-        }
-
-        @Override
-        public String toString() {
-            return filterType + "," + filterRule + "," + enabled + "," + comment;
-        }
-
-        public static Rule fromString(String str) {
-            String[] parts = str.split(",");
-            return new Rule(parts[0], parts[1], Boolean.parseBoolean(parts[2]), parts[3]);
-        }
     }
 }
