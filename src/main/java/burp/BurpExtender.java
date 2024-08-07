@@ -1,7 +1,9 @@
 package burp;
 
 import javax.swing.*;
+import javax.swing.table.DefaultTableCellRenderer;
 import javax.swing.table.DefaultTableModel;
+import javax.swing.table.JTableHeader;
 import java.awt.*;
 import java.io.*;
 import java.net.InetSocketAddress;
@@ -82,8 +84,34 @@ public class BurpExtender implements IBurpExtender, IHttpListener, ITab {
 
         // 中间规则表
         String[] columnNames = {"序号", "过滤方法", "过滤规则", "规则状态", "规则备注"};
-        ruleTableModel = new DefaultTableModel(columnNames, 0);
+        ruleTableModel = new DefaultTableModel(columnNames, 0) {
+            @Override
+            public boolean isCellEditable(int row, int column) {
+                return false;
+            }
+        };
         ruleTable = new JTable(ruleTableModel);
+        ruleTable.setFillsViewportHeight(true);
+
+        // 设置表格居中
+        DefaultTableCellRenderer centerRenderer = new DefaultTableCellRenderer();
+        centerRenderer.setHorizontalAlignment(JLabel.CENTER);
+        for (int i = 0; i < ruleTable.getColumnCount(); i++) {
+            ruleTable.getColumnModel().getColumn(i).setCellRenderer(centerRenderer);
+        }
+
+        // 设置表头居中
+        JTableHeader header = ruleTable.getTableHeader();
+        header.setDefaultRenderer(new DefaultTableCellRenderer() {
+            @Override
+            public Component getTableCellRendererComponent(JTable table, Object value, boolean isSelected, boolean hasFocus, int row, int column) {
+                JLabel label = (JLabel) super.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column);
+                label.setHorizontalAlignment(JLabel.CENTER);
+                label.setFont(label.getFont().deriveFont(Font.BOLD));
+                return label;
+            }
+        });
+
         JScrollPane scrollPane = new JScrollPane(ruleTable);
         mainPanel.add(scrollPane, BorderLayout.CENTER);
 
@@ -119,6 +147,7 @@ public class BurpExtender implements IBurpExtender, IHttpListener, ITab {
         // 加载已保存的规则
         loadRules();
     }
+
 
     private void loadConfig() {
         config = new Properties();
@@ -215,6 +244,21 @@ public class BurpExtender implements IBurpExtender, IHttpListener, ITab {
             JOptionPane.showMessageDialog(mainPanel, "请选择要删除的规则。");
         }
     }
+
+
+
+
+
+
+
+
+
+
+
+
+
+    
+
 
     private void startLogging() {
         forwardingIp = serverIpField.getText().trim();
@@ -407,7 +451,7 @@ public class BurpExtender implements IBurpExtender, IHttpListener, ITab {
         loadRules();
     }
 
-    @Override
+ @Override
     public String getTabCaption() {
         return "日志记录和转发";
     }
@@ -454,6 +498,9 @@ public class BurpExtender implements IBurpExtender, IHttpListener, ITab {
         public static Rule fromString(String str) {
             String[] parts = str.split(",");
             return new Rule(parts[0], parts[1], Boolean.parseBoolean(parts[2]), parts[3]);
+        }
+    }
+}
         }
     }
 }
