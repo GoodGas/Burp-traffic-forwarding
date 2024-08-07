@@ -36,25 +36,3 @@ jobs:
         with:
           name: burp-extension-${{ github.event.inputs.version }}.jar
           path: build/libs/burp-extension-${{ github.event.inputs.version }}.jar
-
-  release:
-    name: Create Release
-    needs: build
-    runs-on: ubuntu-latest
-    
-    steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-
-      - name: Create Release
-        id: create_release
-        uses: softprops/action-gh-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: v${{ github.event.inputs.version }}
-          name: Release ${{ github.event.inputs.version }}
-          body: Release ${{ github.event.inputs.version }}
-          draft: false
-          prerelease: false
-          files: burp-extension-${{ github.event.inputs.version }}.jar/*.jar
