@@ -114,7 +114,7 @@ public class BurpExtender implements IBurpExtender, IHttpListener, ITab {
         }
         applyButton.setEnabled(true);
         stopButton.setEnabled(false);
-        JOptionPane.showMessageDialog(mainPanel, "Logging stopped successfully!");
+        JOptionPane.showMessageDialog(mainPanel, "停止，成功!");
     }
 
     @Override
