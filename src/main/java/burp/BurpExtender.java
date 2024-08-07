@@ -29,6 +29,9 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
     private Properties config;
     private boolean isRunning = false;
     private ExecutorService executorService;
+    private Socket forwardingSocket; // Declare forwardingSocket here
+    private OutputStream forwardingOutputStream; // Declare forwardingOutputStream here
+    private InputStream forwardingInputStream; // Declare forwardingInputStream here
 
     @Override
     public void registerExtenderCallbacks(IBurpExtenderCallbacks callbacks) {
@@ -45,6 +48,7 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
         callbacks.registerHttpListener(this);
         callbacks.registerExtensionStateListener(this);
     }
+
 
     private void initializeUI() {
         mainPanel = new JPanel(new GridBagLayout());
