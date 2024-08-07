@@ -9,6 +9,7 @@ import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 public class BurpExtender implements IBurpExtender, IHttpListener, ITab {
     private IBurpExtenderCallbacks callbacks;
@@ -17,10 +18,11 @@ public class BurpExtender implements IBurpExtender, IHttpListener, ITab {
     private JTextField serverIpField;
     private JTextField serverPortField;
     private JButton applyButton;
+    private JButton stopButton;
     private String forwardingIp;
     private int forwardingPort;
     private ExecutorService executorService;
-    private boolean isConfigured = false;
+    private boolean isRunning = false;
 
     @Override
     public void registerExtenderCallbacks(IBurpExtenderCallbacks callbacks) {
@@ -32,8 +34,6 @@ public class BurpExtender implements IBurpExtender, IHttpListener, ITab {
             buildUI();
             callbacks.addSuiteTab(BurpExtender.this);
         });
-
-        executorService = Executors.newFixedThreadPool(10); // 使用10个线程的线程池
 
         callbacks.registerHttpListener(this);
     }
@@ -62,18 +62,24 @@ public class BurpExtender implements IBurpExtender, IHttpListener, ITab {
 
         gbc.gridx = 0;
         gbc.gridy = 2;
-        gbc.gridwidth = 2;
+        gbc.gridwidth = 1;
         gbc.anchor = GridBagConstraints.CENTER;
-        applyButton = new JButton("Apply Configuration");
+        applyButton = new JButton("Start Logging");
         mainPanel.add(applyButton, gbc);
 
-        applyButton.addActionListener(e -> applyConfiguration());
+        gbc.gridx = 1;
+        stopButton = new JButton("Stop Logging");
+        stopButton.setEnabled(false);
+        mainPanel.add(stopButton, gbc);
+
+        applyButton.addActionListener(e -> startLogging());
+        stopButton.addActionListener(e -> stopLogging());
     }
 
-    private void applyConfiguration() {
+    private void startLogging() {
         forwardingIp = serverIpField.getText().trim();
         if (forwardingIp.isEmpty()) {
-            JOptionPane.showMessageDialog(mainPanel, "Please enter a valid forwarding IP address.");
+            JOptionPane.showMessageDialog(mainPanel, "请输入有效的转发IP地址.");
             return;
         }
 
@@ -83,17 +89,37 @@ public class BurpExtender implements IBurpExtender, IHttpListener, ITab {
                 throw new NumberFormatException();
             }
         } catch (NumberFormatException e) {
-            JOptionPane.showMessageDialog(mainPanel, "Please enter a valid port number (1-65535).");
+            JOptionPane.showMessageDialog(mainPanel, "请输入有效的端口号 (1-65535).");
             return;
         }
 
-        isConfigured = true;
-        JOptionPane.showMessageDialog(mainPanel, "Configuration applied successfully!");
+        executorService = Executors.newFixedThreadPool(10);
+        isRunning = true;
+        applyButton.setEnabled(false);
+        stopButton.setEnabled(true);
+        JOptionPane.showMessageDialog(mainPanel, "成功!");
+    }
+
+    private void stopLogging() {
+        isRunning = false;
+        if (executorService != null) {
+            executorService.shutdown();
+            try {
+                if (!executorService.awaitTermination(800, TimeUnit.MILLISECONDS)) {
+                    executorService.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                executorService.shutdownNow();
+            }
+        }
+        applyButton.setEnabled(true);
+        stopButton.setEnabled(false);
+        JOptionPane.showMessageDialog(mainPanel, "Logging stopped successfully!");
     }
 
     @Override
     public void processHttpMessage(int toolFlag, boolean messageIsRequest, IHttpRequestResponse messageInfo) {
-        if (!isConfigured) return;
+        if (!isRunning) return;
 
         executorService.submit(() -> {
             try {
