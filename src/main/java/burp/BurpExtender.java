@@ -1,7 +1,6 @@
 package burp;
 
 import javax.swing.*;
-import javax.swing.table.DefaultTableCellRenderer;
 import javax.swing.table.DefaultTableModel;
 import java.awt.*;
 import java.io.*;
@@ -83,32 +82,8 @@ public class BurpExtender implements IBurpExtender, IHttpListener, ITab {
 
         // 中间规则表
         String[] columnNames = {"序号", "过滤方法", "过滤规则", "规则状态", "规则备注"};
-        ruleTableModel = new DefaultTableModel(columnNames, 0) {
-            @Override
-            public boolean isCellEditable(int row, int column) {
-                // 仅允许编辑备注列
-                return column == 4;
-            }
-        };
-
+        ruleTableModel = new DefaultTableModel(columnNames, 0);
         ruleTable = new JTable(ruleTableModel);
-        ruleTable.getTableHeader().setDefaultRenderer(new DefaultTableCellRenderer() {
-            @Override
-            public Component getTableCellRendererComponent(JTable table, Object value,
-                                                           boolean isSelected, boolean hasFocus, int row, int column) {
-                JLabel label = (JLabel) super.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column);
-                label.setHorizontalAlignment(SwingConstants.CENTER);
-                label.setFont(label.getFont().deriveFont(Font.BOLD));
-                return label;
-            }
-        });
-
-        DefaultTableCellRenderer centerRenderer = new DefaultTableCellRenderer();
-        centerRenderer.setHorizontalAlignment(SwingConstants.CENTER);
-        for (int i = 0; i < ruleTable.getColumnCount(); i++) {
-            ruleTable.getColumnModel().getColumn(i).setCellRenderer(centerRenderer);
-        }
-
         JScrollPane scrollPane = new JScrollPane(ruleTable);
         mainPanel.add(scrollPane, BorderLayout.CENTER);
 
@@ -158,7 +133,7 @@ public class BurpExtender implements IBurpExtender, IHttpListener, ITab {
     private void saveConfig() {
         config.setProperty("forwardingIp", forwardingIp);
         config.setProperty("forwardingPort", String.valueOf(forwardingPort));
-        
+
         // 保存规则
         StringBuilder rulesStr = new StringBuilder();
         for (Rule rule : rules) {
@@ -189,11 +164,11 @@ public class BurpExtender implements IBurpExtender, IHttpListener, ITab {
 
     private void addRuleToTable(Rule rule) {
         ruleTableModel.addRow(new Object[]{
-            ruleTableModel.getRowCount() + 1,
-            rule.getFilterType(),
-            rule.getFilterRule(),
-            rule.isEnabled() ? "Open" : "Closed",
-            rule.getComment()
+                ruleTableModel.getRowCount() + 1,
+                rule.getFilterType(),
+                rule.getFilterRule(),
+                rule.isEnabled() ? "Open" : "Closed",
+                rule.getComment()
         });
     }
 
@@ -423,11 +398,11 @@ public class BurpExtender implements IBurpExtender, IHttpListener, ITab {
     private void updateUIFromConfig() {
         serverIpField.setText(config.getProperty("forwardingIp", ""));
         serverPortField.setText(config.getProperty("forwardingPort", ""));
-        
+
         // 清空规则表
         ruleTableModel.setRowCount(0);
         rules.clear();
-        
+
         // 重新加载规则
         loadRules();
     }
