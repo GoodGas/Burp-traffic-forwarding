@@ -87,20 +87,21 @@ public class BurpExtender implements IBurpExtender, IHttpListener, ITab {
         ruleTableModel = new DefaultTableModel(columnNames, 0) {
             @Override
             public boolean isCellEditable(int row, int column) {
-                return false;
+                return column == 4; // 只允许编辑备注列
             }
         };
         ruleTable = new JTable(ruleTableModel);
-        ruleTable.setFillsViewportHeight(true);
+        JScrollPane scrollPane = new JScrollPane(ruleTable);
+        mainPanel.add(scrollPane, BorderLayout.CENTER);
 
-        // 设置表格居中
+        // 设置表格居中渲染器
         DefaultTableCellRenderer centerRenderer = new DefaultTableCellRenderer();
         centerRenderer.setHorizontalAlignment(JLabel.CENTER);
         for (int i = 0; i < ruleTable.getColumnCount(); i++) {
             ruleTable.getColumnModel().getColumn(i).setCellRenderer(centerRenderer);
         }
 
-        // 设置表头居中
+        // 设置表头居中和加粗
         JTableHeader header = ruleTable.getTableHeader();
         header.setDefaultRenderer(new DefaultTableCellRenderer() {
             @Override
@@ -111,9 +112,6 @@ public class BurpExtender implements IBurpExtender, IHttpListener, ITab {
                 return label;
             }
         });
-
-        JScrollPane scrollPane = new JScrollPane(ruleTable);
-        mainPanel.add(scrollPane, BorderLayout.CENTER);
 
         // 底部按钮面板
         JPanel bottomPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
@@ -147,7 +145,6 @@ public class BurpExtender implements IBurpExtender, IHttpListener, ITab {
         // 加载已保存的规则
         loadRules();
     }
-
 
     private void loadConfig() {
         config = new Properties();
@@ -244,21 +241,6 @@ public class BurpExtender implements IBurpExtender, IHttpListener, ITab {
             JOptionPane.showMessageDialog(mainPanel, "请选择要删除的规则。");
         }
     }
-
-
-
-
-
-
-
-
-
-
-
-
-
-    
-
 
     private void startLogging() {
         forwardingIp = serverIpField.getText().trim();
@@ -451,7 +433,7 @@ public class BurpExtender implements IBurpExtender, IHttpListener, ITab {
         loadRules();
     }
 
- @Override
+    @Override
     public String getTabCaption() {
         return "日志记录和转发";
     }
@@ -498,9 +480,6 @@ public class BurpExtender implements IBurpExtender, IHttpListener, ITab {
         public static Rule fromString(String str) {
             String[] parts = str.split(",");
             return new Rule(parts[0], parts[1], Boolean.parseBoolean(parts[2]), parts[3]);
-        }
-    }
-}
         }
     }
 }
