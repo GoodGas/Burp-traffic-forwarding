@@ -1,7 +1,9 @@
 package burp;
 
 import javax.swing.*;
+import javax.swing.table.DefaultTableCellRenderer;
 import javax.swing.table.DefaultTableModel;
+import javax.swing.table.JTableHeader;
 import java.awt.*;
 import java.io.*;
 import java.net.Socket;
@@ -125,10 +127,33 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
             }
             @Override
             public boolean isCellEditable(int row, int column) {
-                return column != 0; // 序号列不可编辑
+                return column == 4; // Only the notes column is editable
             }
         };
         ruleTable = new JTable(ruleTableModel);
+
+        // Center-align cell contents and make them non-editable (except notes)
+        DefaultTableCellRenderer centerRenderer = new DefaultTableCellRenderer();
+        centerRenderer.setHorizontalAlignment(JLabel.CENTER);
+        for (int i = 0; i < ruleTable.getColumnCount() - 1; i++) {
+            ruleTable.getColumnModel().getColumn(i).setCellRenderer(centerRenderer);
+        }
+
+        // Make headers bold and center-aligned
+        JTableHeader header = ruleTable.getTableHeader();
+        header.setDefaultRenderer(new DefaultTableCellRenderer() {
+            @Override
+            public Component getTableCellRendererComponent(JTable table, Object value,
+                                                           boolean isSelected, boolean hasFocus,
+                                                           int row, int column) {
+                JLabel label = (JLabel) super.getTableCellRendererComponent(table, value,
+                        isSelected, hasFocus, row, column);
+                label.setHorizontalAlignment(JLabel.CENTER);
+                label.setFont(label.getFont().deriveFont(Font.BOLD));
+                return label;
+            }
+        });
+
         JScrollPane scrollPane = new JScrollPane(ruleTable);
         mainPanel.add(scrollPane, gbc);
 
