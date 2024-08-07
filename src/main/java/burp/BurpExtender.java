@@ -422,3 +422,4 @@ public class BurpExtender implements IBurpExtender, IHttpListener, ITab {
         return mainPanel;
     }
 }
+
