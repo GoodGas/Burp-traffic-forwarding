@@ -3,7 +3,6 @@ package burp;
 import javax.swing.*;
 import javax.swing.table.DefaultTableCellRenderer;
 import javax.swing.table.DefaultTableModel;
-import javax.swing.table.JTableHeader;
 import java.awt.*;
 import java.io.*;
 import java.net.InetSocketAddress;
@@ -87,31 +86,31 @@ public class BurpExtender implements IBurpExtender, IHttpListener, ITab {
         ruleTableModel = new DefaultTableModel(columnNames, 0) {
             @Override
             public boolean isCellEditable(int row, int column) {
-                return column == 4; // 只允许编辑备注列
+                // 仅允许编辑备注列
+                return column == 4;
             }
         };
+
         ruleTable = new JTable(ruleTableModel);
-        JScrollPane scrollPane = new JScrollPane(ruleTable);
-        mainPanel.add(scrollPane, BorderLayout.CENTER);
-
-        // 设置表格居中渲染器
-        DefaultTableCellRenderer centerRenderer = new DefaultTableCellRenderer();
-        centerRenderer.setHorizontalAlignment(JLabel.CENTER);
-        for (int i = 0; i < ruleTable.getColumnCount(); i++) {
-            ruleTable.getColumnModel().getColumn(i).setCellRenderer(centerRenderer);
-        }
-
-        // 设置表头居中和加粗
-        JTableHeader header = ruleTable.getTableHeader();
-        header.setDefaultRenderer(new DefaultTableCellRenderer() {
+        ruleTable.getTableHeader().setDefaultRenderer(new DefaultTableCellRenderer() {
             @Override
-            public Component getTableCellRendererComponent(JTable table, Object value, boolean isSelected, boolean hasFocus, int row, int column) {
+            public Component getTableCellRendererComponent(JTable table, Object value,
+                                                           boolean isSelected, boolean hasFocus, int row, int column) {
                 JLabel label = (JLabel) super.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column);
-                label.setHorizontalAlignment(JLabel.CENTER);
+                label.setHorizontalAlignment(SwingConstants.CENTER);
                 label.setFont(label.getFont().deriveFont(Font.BOLD));
                 return label;
             }
         });
+
+        DefaultTableCellRenderer centerRenderer = new DefaultTableCellRenderer();
+        centerRenderer.setHorizontalAlignment(SwingConstants.CENTER);
+        for (int i = 0; i < ruleTable.getColumnCount(); i++) {
+            ruleTable.getColumnModel().getColumn(i).setCellRenderer(centerRenderer);
+        }
+
+        JScrollPane scrollPane = new JScrollPane(ruleTable);
+        mainPanel.add(scrollPane, BorderLayout.CENTER);
 
         // 底部按钮面板
         JPanel bottomPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
