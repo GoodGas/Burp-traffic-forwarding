@@ -2,41 +2,36 @@ package burp;
 
 import javax.swing.*;
 import java.awt.*;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.regex.Pattern;
-import java.util.stream.Collectors;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.net.Socket;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
-public class BurpExtender implements IBurpExtender, ITab, IHttpListener {
+public class BurpExtender implements IBurpExtender, IHttpListener, ITab {
     private IBurpExtenderCallbacks callbacks;
     private IExtensionHelpers helpers;
     private JPanel mainPanel;
     private JTextField serverIpField;
     private JTextField serverPortField;
-    private JTextArea whitelistArea;
-    private JTextArea blacklistArea;
     private JButton applyButton;
-    
     private String forwardingIp;
     private int forwardingPort;
-    private List<Pattern> whitelistPatterns;
-    private List<Pattern> blacklistPatterns;
+    private ExecutorService executorService;
     private boolean isConfigured = false;
 
     @Override
     public void registerExtenderCallbacks(IBurpExtenderCallbacks callbacks) {
         this.callbacks = callbacks;
         this.helpers = callbacks.getHelpers();
+        callbacks.setExtensionName("Multithreaded Logger and Forwarder");
 
-        callbacks.setExtensionName("HTTP History Forwarder");
+        SwingUtilities.invokeLater(this::buildUI);
+        callbacks.addSuiteTab(this);
 
-        SwingUtilities.invokeLater(() -> {
-            buildUI();
-            callbacks.addSuiteTab(BurpExtender.this);
-        });
-
-        whitelistPatterns = new ArrayList<>();
-        blacklistPatterns = new ArrayList<>();
+        executorService = Executors.newFixedThreadPool(10); // 使用10个线程的线程池
 
         callbacks.registerHttpListener(this);
     }
@@ -66,23 +61,6 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener {
         gbc.gridx = 0;
         gbc.gridy = 2;
         gbc.gridwidth = 2;
-        mainPanel.add(new JLabel("Whitelist (one regex per line):"), gbc);
-
-        gbc.gridy = 3;
-        whitelistArea = new JTextArea(10, 30);
-        JScrollPane whitelistScroll = new JScrollPane(whitelistArea);
-        mainPanel.add(whitelistScroll, gbc);
-
-        gbc.gridy = 4;
-        mainPanel.add(new JLabel("Blacklist (one regex per line):"), gbc);
-
-        gbc.gridy = 5;
-        blacklistArea = new JTextArea(10, 30);
-        JScrollPane blacklistScroll = new JScrollPane(blacklistArea);
-        mainPanel.add(blacklistScroll, gbc);
-
-        gbc.gridy = 6;
-        gbc.gridwidth = 2;
         gbc.anchor = GridBagConstraints.CENTER;
         applyButton = new JButton("Apply Configuration");
         mainPanel.add(applyButton, gbc);
@@ -107,72 +85,56 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener {
             return;
         }
 
-        whitelistPatterns = compilePatterns(whitelistArea.getText());
-        blacklistPatterns = compilePatterns(blacklistArea.getText());
-
         isConfigured = true;
-        JOptionPane.showMessageDialog(mainPanel, "Configuration applied successfully! The plugin will now process HTTP history and new requests.");
-        
-        processExistingHttpHistory();
-    }
-
-    private List<Pattern> compilePatterns(String input) {
-        return input.lines()
-            .filter(s -> !s.trim().isEmpty())
-            .map(s -> {
-                try {
-                    return Pattern.compile(s.trim(), Pattern.CASE_INSENSITIVE);
-                } catch (Exception e) {
-                    callbacks.printError("Invalid regex pattern: " + s);
-                    return null;
-                }
-            })
-            .filter(p -> p != null)
-            .collect(Collectors.toList());
-    }
-
-    private void processExistingHttpHistory() {
-        IHttpRequestResponse[] historyItems = callbacks.getProxyHistory();
-        for (IHttpRequestResponse item : historyItems) {
-            processHttpMessage(IBurpExtenderCallbacks.TOOL_PROXY, true, item);
-        }
+        JOptionPane.showMessageDialog(mainPanel, "Configuration applied successfully!");
     }
 
     @Override
     public void processHttpMessage(int toolFlag, boolean messageIsRequest, IHttpRequestResponse messageInfo) {
-        if (!isConfigured || !messageIsRequest) {
-            return;
-        }
+        if (!isConfigured) return;
 
-        IHttpService originalService = messageInfo.getHttpService();
-        String host = originalService.getHost();
+        executorService.submit(() -> {
+            try {
+                String toolName = callbacks.getToolName(toolFlag);
+                String messageType = messageIsRequest ? "REQUEST" : "RESPONSE";
+                String timestamp = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS").format(new Date());
 
-        boolean shouldForward = whitelistPatterns.isEmpty() || whitelistPatterns.stream().anyMatch(p -> p.matcher(host).find());
-        boolean isBlacklisted = blacklistPatterns.stream().anyMatch(p -> p.matcher(host).find());
+                StringBuilder logMessage = new StringBuilder();
+                logMessage.append(String.format("[%s] [%s] [%s]\n", timestamp, toolName, messageType));
 
-        if (shouldForward && !isBlacklisted) {
-            IHttpService forwardingService = helpers.buildHttpService(forwardingIp, forwardingPort, originalService.getProtocol());
-            
-            byte[] request = messageInfo.getRequest();
-            IRequestInfo requestInfo = helpers.analyzeRequest(request);
-            List<String> headers = requestInfo.getHeaders();
+                if (messageIsRequest) {
+                    IRequestInfo requestInfo = helpers.analyzeRequest(messageInfo);
+                    logMessage.append(String.format("URL: %s\n", requestInfo.getUrl()));
+                    logMessage.append(String.format("Method: %s\n", requestInfo.getMethod()));
+                } else {
+                    IResponseInfo responseInfo = helpers.analyzeResponse(messageInfo.getResponse());
+                    logMessage.append(String.format("Status Code: %d\n", responseInfo.getStatusCode()));
+                }
 
-            headers.removeIf(header -> header.toLowerCase().startsWith("host:"));
-            headers.add("Host: " + originalService.getHost());
+                byte[] message = messageIsRequest ? messageInfo.getRequest() : messageInfo.getResponse();
+                logMessage.append(new String(message));
+                logMessage.append("\n\n");
 
-            byte[] body = request.clone();
-            body = new String(body).substring(requestInfo.getBodyOffset()).getBytes();
-            byte[] newRequest = helpers.buildHttpMessage(headers, body);
+                forwardLog(logMessage.toString());
+            } catch (Exception e) {
+                callbacks.printError("Error processing HTTP message: " + e.getMessage());
+            }
+        });
+    }
 
-            IHttpRequestResponse newRequestResponse = callbacks.makeHttpRequest(forwardingService, newRequest);
-            
-            // 如果需要处理响应，可以在这里添加代码
+    private void forwardLog(String logMessage) {
+        try (Socket socket = new Socket(forwardingIp, forwardingPort);
+             OutputStream out = socket.getOutputStream()) {
+            out.write(logMessage.getBytes());
+            out.flush();
+        } catch (IOException e) {
+            callbacks.printError("Error forwarding log: " + e.getMessage());
         }
     }
 
     @Override
     public String getTabCaption() {
-        return "HTTP History Forwarder";
+        return "Logger & Forwarder";
     }
 
     @Override
