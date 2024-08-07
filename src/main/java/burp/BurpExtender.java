@@ -16,14 +16,13 @@ public class BurpExtender implements IBurpExtender, IHttpListener, ITab {
     private JPanel mainPanel;
     private JTextField serverIpField;
     private JTextField serverPortField;
-    private JTextArea blacklistArea;
-    private JTextField domainFilterField;
-    private JTextField methodFilterField;
-    private JTextField statusCodeFilterField;
-    private JTextField ipFilterField;
+    private JTextArea ruleArea;
     private JButton applyButton;
     private JButton stopButton;
     private JButton testConnectionButton;
+    private JButton addRuleButton;
+    private JButton removeRuleButton;
+    private JButton saveConfigButton;
     private JButton exportConfigButton;
     private JButton importConfigButton;
     private String forwardingIp;
@@ -40,7 +39,7 @@ public class BurpExtender implements IBurpExtender, IHttpListener, ITab {
     public void registerExtenderCallbacks(IBurpExtenderCallbacks callbacks) {
         this.callbacks = callbacks;
         this.helpers = callbacks.getHelpers();
-        callbacks.setExtensionName("增强型日志记录和转发器");
+        callbacks.setExtensionName("日志记录和转发器");
 
         loadConfig();
 
@@ -56,88 +55,81 @@ public class BurpExtender implements IBurpExtender, IHttpListener, ITab {
         mainPanel = new JPanel(new GridBagLayout());
         GridBagConstraints gbc = new GridBagConstraints();
         gbc.insets = new Insets(5, 5, 5, 5);
-        gbc.anchor = GridBagConstraints.WEST;
+        gbc.fill = GridBagConstraints.HORIZONTAL;
 
-        // Server IP and Port
-        addLabelField("转发服务器 IP:", serverIpField = new JTextField(15), gbc, 0);
-        serverIpField.setText(config.getProperty("forwardingIp", ""));
-
-        addLabelField("转发服务器端口:", serverPortField = new JTextField(5), gbc, 1);
-        serverPortField.setText(config.getProperty("forwardingPort", ""));
-
-        // Buttons
-        testConnectionButton = new JButton("测试连接");
-        applyButton = new JButton("开始记录");
-        stopButton = new JButton("停止记录");
-        exportConfigButton = new JButton("导出配置");
-        importConfigButton = new JButton("导入配置");
-
-        stopButton.setEnabled(false);
-
-        gbc.gridwidth = 1;
         gbc.gridx = 0;
-        gbc.gridy = 2;
-        mainPanel.add(testConnectionButton, gbc);
+        gbc.gridy = 0;
+        mainPanel.add(new JLabel("转发服务器 IP:"), gbc);
+
         gbc.gridx = 1;
-        mainPanel.add(applyButton, gbc);
+        serverIpField = new JTextField(15);
+        serverIpField.setText(config.getProperty("forwardingIp", ""));
+        mainPanel.add(serverIpField, gbc);
+
         gbc.gridx = 2;
-        mainPanel.add(stopButton, gbc);
+        mainPanel.add(new JLabel("端口:"), gbc);
+
         gbc.gridx = 3;
-        mainPanel.add(exportConfigButton, gbc);
+        serverPortField = new JTextField(5);
+        serverPortField.setText(config.getProperty("forwardingPort", ""));
+        mainPanel.add(serverPortField, gbc);
+
         gbc.gridx = 4;
+        testConnectionButton = new JButton("测试连接");
+        mainPanel.add(testConnectionButton, gbc);
+
+        gbc.gridy = 1;
+        gbc.gridx = 0;
+        applyButton = new JButton("开始记录");
+        mainPanel.add(applyButton, gbc);
+
+        gbc.gridx = 1;
+        stopButton = new JButton("停止记录");
+        stopButton.setEnabled(false);
+        mainPanel.add(stopButton, gbc);
+
+        gbc.gridx = 2;
+        addRuleButton = new JButton("添加规则");
+        mainPanel.add(addRuleButton, gbc);
+
+        gbc.gridx = 3;
+        removeRuleButton = new JButton("删除规则");
+        mainPanel.add(removeRuleButton, gbc);
+
+        gbc.gridx = 4;
+        saveConfigButton = new JButton("保存配置");
+        mainPanel.add(saveConfigButton, gbc);
+
+        gbc.gridy = 2;
+        gbc.gridx = 0;
+        gbc.gridwidth = 2;
+        exportConfigButton = new JButton("导出配置");
+        mainPanel.add(exportConfigButton, gbc);
+
+        gbc.gridx = 2;
+        importConfigButton = new JButton("导入配置");
         mainPanel.add(importConfigButton, gbc);
 
-        // Event handlers
-        testConnectionButton.addActionListener(e -> testConnection());
+        gbc.gridy = 3;
+        gbc.gridx = 0;
+        gbc.gridwidth = 5;
+        gbc.fill = GridBagConstraints.BOTH;
+        gbc.weightx = 1.0;
+        gbc.weighty = 1.0;
+        ruleArea = new JTextArea(10, 40);
+        ruleArea.setLineWrap(true);
+        ruleArea.setText(config.getProperty("rules", ""));
+        JScrollPane scrollPane = new JScrollPane(ruleArea);
+        mainPanel.add(scrollPane, gbc);
+
         applyButton.addActionListener(e -> startLogging());
         stopButton.addActionListener(e -> stopLogging());
+        testConnectionButton.addActionListener(e -> testConnection());
+        addRuleButton.addActionListener(e -> addRule());
+        removeRuleButton.addActionListener(e -> removeRule());
+        saveConfigButton.addActionListener(e -> saveConfig());
         exportConfigButton.addActionListener(e -> exportConfig());
         importConfigButton.addActionListener(e -> importConfig());
-
-        // Filters
-        addFilterPanel(gbc);
-    }
-
-    private void addLabelField(String label, JTextField field, GridBagConstraints gbc, int row) {
-        gbc.gridx = 0;
-        gbc.gridy = row;
-        mainPanel.add(new JLabel(label), gbc);
-        gbc.gridx = 1;
-        mainPanel.add(field, gbc);
-    }
-
-    private void addFilterPanel(GridBagConstraints gbc) {
-        JPanel filterPanel = new JPanel(new GridLayout(5, 2, 5, 5));
-        filterPanel.add(new JLabel("黑名单扩展名 (逗号分隔):"));
-        blacklistArea = new JTextArea(5, 20);
-        blacklistArea.setText(config.getProperty("blacklist", ""));
-        filterPanel.add(new JScrollPane(blacklistArea));
-
-        filterPanel.add(new JLabel("域名过滤 (正则表达式):"));
-        domainFilterField = new JTextField(15);
-        domainFilterField.setText(config.getProperty("domainFilter", ""));
-        filterPanel.add(domainFilterField);
-
-        filterPanel.add(new JLabel("HTTP 方法过滤 (逗号分隔):"));
-        methodFilterField = new JTextField(15);
-        methodFilterField.setText(config.getProperty("methodFilter", ""));
-        filterPanel.add(methodFilterField);
-
-        filterPanel.add(new JLabel("状态码过滤 (逗号分隔):"));
-        statusCodeFilterField = new JTextField(15);
-        statusCodeFilterField.setText(config.getProperty("statusCodeFilter", ""));
-        filterPanel.add(statusCodeFilterField);
-
-        filterPanel.add(new JLabel("IP 过滤 (逗号分隔):"));
-        ipFilterField = new JTextField(15);
-        ipFilterField.setText(config.getProperty("ipFilter", ""));
-        filterPanel.add(ipFilterField);
-
-        gbc.gridx = 0;
-        gbc.gridy = 3;
-        gbc.gridwidth = GridBagConstraints.REMAINDER;
-        gbc.fill = GridBagConstraints.BOTH;
-        mainPanel.add(filterPanel, gbc);
     }
 
     private void loadConfig() {
@@ -150,14 +142,9 @@ public class BurpExtender implements IBurpExtender, IHttpListener, ITab {
     }
 
     private void saveConfig() {
-        config.setProperty("forwardingIp", serverIpField.getText().trim());
-        config.setProperty("forwardingPort", serverPortField.getText().trim());
-        config.setProperty("blacklist", blacklistArea.getText());
-        config.setProperty("domainFilter", domainFilterField.getText());
-        config.setProperty("methodFilter", methodFilterField.getText());
-        config.setProperty("statusCodeFilter", statusCodeFilterField.getText());
-        config.setProperty("ipFilter", ipFilterField.getText());
-
+        config.setProperty("forwardingIp", forwardingIp);
+        config.setProperty("forwardingPort", String.valueOf(forwardingPort));
+        config.setProperty("rules", ruleArea.getText());
         try (FileOutputStream out = new FileOutputStream(CONFIG_FILE)) {
             config.store(out, "日志记录和转发器配置");
         } catch (IOException e) {
@@ -218,7 +205,7 @@ public class BurpExtender implements IBurpExtender, IHttpListener, ITab {
 
     private void updateBlacklist() {
         blacklist = new HashSet<>();
-        String[] extensions = blacklistArea.getText().split(",");
+        String[] extensions = ruleArea.getText().split(",");
         for (String ext : extensions) {
             ext = ext.trim().toLowerCase();
             if (!ext.isEmpty()) {
@@ -239,70 +226,15 @@ public class BurpExtender implements IBurpExtender, IHttpListener, ITab {
                 IRequestInfo requestInfo = helpers.analyzeRequest(messageInfo);
                 IResponseInfo responseInfo = messageIsRequest ? null : helpers.analyzeResponse(messageInfo.getResponse());
                 String url = requestInfo.getUrl().toString().toLowerCase();
-
+                
                 // 扩展名过滤
                 for (String ext : blacklist) {
                     if (url.endsWith(ext)) {
                         return;
                     }
                 }
-
-                // 域名过滤
-                String domainFilter = domainFilterField.getText().trim();
-                if (!domainFilter.isEmpty() && !url.matches(domainFilter)) {
-                    return;
-                }
-
-                // HTTP方法过滤
-                String methodFilter = methodFilterField.getText().trim();
-                if (!methodFilter.isEmpty()) {
-                    String[] methods = methodFilter.split(",");
-                    boolean methodMatch = false;
-                    for (String method : methods) {
-                        if (requestInfo.getMethod().equalsIgnoreCase(method.trim())) {
-                            methodMatch = true;
-                            break;
-                        }
-                    }
-                    if (!methodMatch) {
-                        return;
-                    }
-                }
-
-                // IP过滤
-                String ipFilter = ipFilterField.getText().trim();
-                if (!ipFilter.isEmpty()) {
-                    String host = requestInfo.getUrl().getHost();
-                    String[] ips = ipFilter.split(",");
-                    boolean ipMatch = false;
-                    for (String ip : ips) {
-                        if (host.equals(ip.trim())) {
-                            ipMatch = true;
-                            break;
-                        }
-                    }
-                    if (!ipMatch) {
-                        return;
-                    }
-                }
-
-                // 状态码过滤
-                if (!messageIsRequest) {
-                    String statusCodeFilter = statusCodeFilterField.getText().trim();
-                    if (!statusCodeFilter.isEmpty()) {
-                        String[] statusCodes = statusCodeFilter.split(",");
-                        boolean statusCodeMatch = false;
-                        for (String statusCode : statusCodes) {
-                            if (String.valueOf(responseInfo.getStatusCode()).equals(statusCode.trim())) {
-                                statusCodeMatch = true;
-                                break;
-                            }
-                        }
-                        if (!statusCodeMatch) {
-                            return;
-                        }
-                    }
-                }
+                
+                // 其他过滤逻辑...
 
                 String toolName = callbacks.getToolName(toolFlag);
                 String messageType = messageIsRequest ? "请求" : "响应";
@@ -373,6 +305,16 @@ public class BurpExtender implements IBurpExtender, IHttpListener, ITab {
         }
     }
 
+    private void addRule() {
+        // Logic to add a new rule
+        JOptionPane.showMessageDialog(mainPanel, "添加规则功能尚未实现！");
+    }
+
+    private void removeRule() {
+        // Logic to remove a selected rule
+        JOptionPane.showMessageDialog(mainPanel, "删除规则功能尚未实现！");
+    }
+
     private void exportConfig() {
         JFileChooser fileChooser = new JFileChooser();
         fileChooser.setDialogTitle("选择导出位置");
@@ -405,11 +347,7 @@ public class BurpExtender implements IBurpExtender, IHttpListener, ITab {
     private void updateUIFromConfig() {
         serverIpField.setText(config.getProperty("forwardingIp", ""));
         serverPortField.setText(config.getProperty("forwardingPort", ""));
-        blacklistArea.setText(config.getProperty("blacklist", ""));
-        domainFilterField.setText(config.getProperty("domainFilter", ""));
-        methodFilterField.setText(config.getProperty("methodFilter", ""));
-        statusCodeFilterField.setText(config.getProperty("statusCodeFilter", ""));
-        ipFilterField.setText(config.getProperty("ipFilter", ""));
+        ruleArea.setText(config.getProperty("rules", ""));
     }
 
     @Override
@@ -422,4 +360,3 @@ public class BurpExtender implements IBurpExtender, IHttpListener, ITab {
         return mainPanel;
     }
 }
-
