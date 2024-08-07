@@ -247,106 +247,104 @@ public class BurpExtender implements IBurpExtender, IHttpListener, ITab {
         }
     }
 
-    @Override
-    public void processHttpMessage(int toolFlag, boolean messageIsRequest, IHttpRequestResponse messageInfo) {
-        if (!isRunning) return;
+@Override
+public void processHttpMessage(int toolFlag, boolean messageIsRequest, IHttpRequestResponse messageInfo) {
+    if (!isRunning) return;
 
-        executorService.submit(() -> {
-            try {
-                if (messageIsRequest) {
-                    IRequestInfo requestInfo = helpers.analyzeRequest(messageInfo);
-                    String url = requestInfo.getUrl().toString().toLowerCase();
-                    
-                    // 扩展名过滤
-                    for (String ext : blacklist) {
-                        if (url.endsWith(ext)) {
-                            return;
+    executorService.submit(() -> {
+        try {
+            IRequestInfo requestInfo = helpers.analyzeRequest(messageInfo);
+            IResponseInfo responseInfo = messageIsRequest ? null : helpers.analyzeResponse(messageInfo.getResponse());
+            String url = requestInfo.getUrl().toString().toLowerCase();
+            
+            // 扩展名过滤
+            for (String ext : blacklist) {
+                if (url.endsWith(ext)) {
+                    return;
+                }
+            }
+            
+            // 域名过滤
+            String domainFilter = domainFilterField.getText().trim();
+            if (!domainFilter.isEmpty() && !url.matches(domainFilter)) {
+                return;
+            }
+            
+            // HTTP方法过滤
+            String methodFilter = methodFilterField.getText().trim();
+            if (!methodFilter.isEmpty()) {
+                String[] methods = methodFilter.split(",");
+                boolean methodMatch = false;
+                for (String method : methods) {
+                    if (requestInfo.getMethod().equalsIgnoreCase(method.trim())) {
+                        methodMatch = true;
+                        break;
+                    }
+                }
+                if (!methodMatch) {
+                    return;
+                }
+            }
+            
+            // IP过滤
+            String ipFilter = ipFilterField.getText().trim();
+            if (!ipFilter.isEmpty()) {
+                String host = requestInfo.getUrl().getHost();
+                String[] ips = ipFilter.split(",");
+                boolean ipMatch = false;
+                for (String ip : ips) {
+                    if (host.equals(ip.trim())) {
+                        ipMatch = true;
+                        break;
+                    }
+                }
+                if (!ipMatch) {
+                    return;
+                }
+            }
+
+            // 状态码过滤
+            if (!messageIsRequest) {
+                String statusCodeFilter = statusCodeFilterField.getText().trim();
+                if (!statusCodeFilter.isEmpty()) {
+                    String[] statusCodes = statusCodeFilter.split(",");
+                    boolean statusCodeMatch = false;
+                    for (String statusCode : statusCodes) {
+                        if (String.valueOf(responseInfo.getStatusCode()).equals(statusCode.trim())) {
+                            statusCodeMatch = true;
+                            break;
                         }
                     }
-                    
-                    // 域名过滤
-                    String domainFilter = domainFilterField.getText().trim();
-                    if (!domainFilter.isEmpty() && !url.matches(domainFilter)) {
+                    if (!statusCodeMatch) {
                         return;
                     }
-                    
-                    // HTTP方法过滤
-                    String methodFilter = methodFilterField.getText().trim();
-                    if (!methodFilter.isEmpty()) {
-                        String[] methods = methodFilter.split(",");
-                        boolean methodMatch = false;
-                        for (String method : methods) {
-                            if (requestInfo.getMethod().equalsIgnoreCase(method.trim())) {
-                                methodMatch = true;
-                                break;
-                            }
-                        }
-                        if (!methodMatch) {
-                            return;
-                        }
-                    }
-                    
-                    // IP过滤
-                    String ipFilter = ipFilterField.getText().trim();
-                    if (!ipFilter.isEmpty()) {
-                        String host = requestInfo.getUrl().getHost();
-                        String[] ips = ipFilter.split(",");
-                        boolean ipMatch = false;
-                        for (String ip : ips) {
-                            if (host.equals(ip.trim())) {
-                                ipMatch = true;
-                                break;
-                            }
-                        }
-                        if (!ipMatch) {
-                            return;
-                        }
-                    }
-                } else {
-                    // 状态码过滤
-                    String statusCodeFilter = statusCodeFilterField.getText().trim();
-                    if (!statusCodeFilter.isEmpty()) {
-                        IResponseInfo responseInfo = helpers.analyzeResponse(messageInfo.getResponse());
-                        String[] statusCodes = statusCodeFilter.split(",");
-                        boolean statusCodeMatch = false;
-                        for (String statusCode : statusCodes) {
-                            if (String.valueOf(responseInfo.getStatusCode()).equals(statusCode.trim())) {
-                                statusCodeMatch = true;
-                                break;
-                            }
-                        }
-                        if (!statusCodeMatch) {
-                            return;
-                        }
-                    }
                 }
-
-                String toolName = callbacks.getToolName(toolFlag);
-                String messageType = messageIsRequest ? "请求" : "响应";
-                String timestamp = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS").format(new Date());
-
-                StringBuilder logMessage = new StringBuilder();
-                logMessage.append(String.format("[%s] [%s] [%s]\n", timestamp, toolName, messageType));
-
-                if (messageIsRequest) {
-                    IRequestInfo requestInfo = helpers.analyzeRequest(messageInfo);
-                    logMessage.append(String.format("URL: %s\n", requestInfo.getUrl()));
-                    logMessage.append(String.format("方法: %s\n", requestInfo.getMethod()));
-                } else {
-                    IResponseInfo responseInfo = helpers.analyzeResponse(messageInfo.getResponse());
-                    logMessage.append(String.format("状态码: %d\n", responseInfo.getStatusCode()));
-                }
-
-                byte[] message = messageIsRequest ? messageInfo.getRequest() : messageInfo.getResponse();
-                logMessage.append(new String(message));
-                logMessage.append("\n\n");
-
-                logQueue.offer(logMessage.toString());
-            } catch (Exception e) {
-                callbacks.printError("处理 HTTP 消息时出错: " + e.getMessage());
             }
-        });
-    }
+
+            String toolName = callbacks.getToolName(toolFlag);
+            String messageType = messageIsRequest ? "请求" : "响应";
+            String timestamp = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS").format(new Date());
+
+            StringBuilder logMessage = new StringBuilder();
+            logMessage.append(String.format("[%s] [%s] [%s]\n", timestamp, toolName, messageType));
+
+            logMessage.append(String.format("URL: %s\n", requestInfo.getUrl()));
+            logMessage.append(String.format("方法: %s\n", requestInfo.getMethod()));
+
+            if (!messageIsRequest) {
+                logMessage.append(String.format("状态码: %d\n", responseInfo.getStatusCode()));
+            }
+
+            byte[] message = messageIsRequest ? messageInfo.getRequest() : messageInfo.getResponse();
+            logMessage.append(new String(message));
+            logMessage.append("\n\n");
+
+            logQueue.offer(logMessage.toString());
+        } catch (Exception e) {
+            callbacks.printError("处理 HTTP 消息时出错: " + e.getMessage());
+        }
+    });
+}
 
     private void sendLogs() {
         List<String> logs = new ArrayList<>();
