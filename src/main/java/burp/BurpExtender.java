@@ -16,9 +16,10 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener {
     private JPanel mainPanel;
     private JTextField serverIpField;
     private JTextField serverPortField;
-    private JButton applyButton;
-    private JButton stopButton;
     private JButton testConnectionButton;
+    private JButton startButton;
+    private JButton stopButton;
+    private JButton saveConfigButton;
     private JButton exportConfigButton;
     private JButton importConfigButton;
     private JTable ruleTable;
@@ -26,13 +27,12 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener {
     private Properties config;
     private boolean isRunning = false;
     private ExecutorService executorService;
-    private PrintWriter logWriter;
 
     @Override
     public void registerExtenderCallbacks(IBurpExtenderCallbacks callbacks) {
         this.callbacks = callbacks;
         this.helpers = callbacks.getHelpers();
-        callbacks.setExtensionName("Improved HTTP Logger");
+        callbacks.setExtensionName("HTTP Forwarder");
 
         SwingUtilities.invokeLater(this::initializeUI);
 
@@ -47,41 +47,75 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener {
         mainPanel = new JPanel(new GridBagLayout());
         GridBagConstraints gbc = new GridBagConstraints();
         gbc.insets = new Insets(5, 5, 5, 5);
-        gbc.anchor = GridBagConstraints.WEST;
+        gbc.fill = GridBagConstraints.HORIZONTAL;
 
-        addServerSettings(gbc);
-        addRuleTable(gbc);
-        addButtons(gbc);
-
-        callbacks.addSuiteTab(this);
-    }
-
-    private void addServerSettings(GridBagConstraints gbc) {
+        // First row
         gbc.gridx = 0;
         gbc.gridy = 0;
         mainPanel.add(new JLabel("转发服务器 IP:"), gbc);
 
         gbc.gridx = 1;
+        gbc.weightx = 1.0;
         serverIpField = new JTextField(15);
         serverIpField.setText(config.getProperty("forwardingIp", ""));
         mainPanel.add(serverIpField, gbc);
 
         gbc.gridx = 2;
+        gbc.weightx = 0;
         mainPanel.add(new JLabel("端口:"), gbc);
 
         gbc.gridx = 3;
+        gbc.weightx = 0.5;
         serverPortField = new JTextField(5);
         serverPortField.setText(config.getProperty("forwardingPort", ""));
         mainPanel.add(serverPortField, gbc);
-    }
 
-    private void addRuleTable(GridBagConstraints gbc) {
+        gbc.gridx = 4;
+        gbc.weightx = 0;
+        testConnectionButton = new JButton("测试连接");
+        mainPanel.add(testConnectionButton, gbc);
+
+        gbc.gridx = 5;
+        startButton = new JButton("开始连接");
+        mainPanel.add(startButton, gbc);
+
+        gbc.gridx = 6;
+        stopButton = new JButton("停止连接");
+        stopButton.setEnabled(false);
+        mainPanel.add(stopButton, gbc);
+
+        // Second row
         gbc.gridx = 0;
         gbc.gridy = 1;
-        gbc.gridwidth = 4;
+        JButton addRuleButton = new JButton("添加规则");
+        mainPanel.add(addRuleButton, gbc);
+
+        gbc.gridx = 1;
+        JButton deleteRuleButton = new JButton("删除规则");
+        mainPanel.add(deleteRuleButton, gbc);
+
+        gbc.gridx = 2;
+        saveConfigButton = new JButton("保存配置");
+        mainPanel.add(saveConfigButton, gbc);
+
+        gbc.gridx = 3;
+        gbc.gridwidth = 2;
+        exportConfigButton = new JButton("导出配置");
+        mainPanel.add(exportConfigButton, gbc);
+
+        gbc.gridx = 5;
+        gbc.gridwidth = 2;
+        importConfigButton = new JButton("导入配置");
+        mainPanel.add(importConfigButton, gbc);
+
+        // Rule table
+        gbc.gridx = 0;
+        gbc.gridy = 2;
+        gbc.gridwidth = 7;
+        gbc.weighty = 1.0;
         gbc.fill = GridBagConstraints.BOTH;
         
-        String[] columnNames = {"序号", "过滤方法", "规则", "状态", "备注"};
+        String[] columnNames = {"序号", "过滤方法", "过滤规则", "规则状态", "规则备注"};
         ruleTableModel = new DefaultTableModel(columnNames, 0) {
             @Override
             public Class<?> getColumnClass(int column) {
@@ -90,120 +124,24 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener {
             }
             @Override
             public boolean isCellEditable(int row, int column) {
-                return column != 0;
+                return column != 0; // 序号列不可编辑
             }
         };
         ruleTable = new JTable(ruleTableModel);
         JScrollPane scrollPane = new JScrollPane(ruleTable);
-        scrollPane.setPreferredSize(new Dimension(800, 300));
         mainPanel.add(scrollPane, gbc);
 
-        JButton addRuleButton = new JButton("添加规则");
-        addRuleButton.addActionListener(e -> addNewRule());
-        gbc.gridy = 2;
-        gbc.fill = GridBagConstraints.NONE;
-        mainPanel.add(addRuleButton, gbc);
-
-        JButton deleteRuleButton = new JButton("删除规则");
-        deleteRuleButton.addActionListener(e -> deleteSelectedRule());
-        gbc.gridx = 1;
-        mainPanel.add(deleteRuleButton, gbc);
-    }
-
-    private void addButtons(GridBagConstraints gbc) {
-        gbc.gridy = 3;
-        gbc.gridwidth = 1;
-        gbc.fill = GridBagConstraints.NONE;
-        applyButton = new JButton("开始记录");
-        mainPanel.add(applyButton, gbc);
-
-        gbc.gridx = 1;
-        stopButton = new JButton("停止记录");
-        stopButton.setEnabled(false);
-        mainPanel.add(stopButton, gbc);
-
-        gbc.gridx = 2;
-        testConnectionButton = new JButton("测试连接");
-        mainPanel.add(testConnectionButton, gbc);
-
-        gbc.gridx = 0;
-        gbc.gridy = 4;
-        exportConfigButton = new JButton("导出配置");
-        mainPanel.add(exportConfigButton, gbc);
-
-        gbc.gridx = 1;
-        importConfigButton = new JButton("导入配置");
-        mainPanel.add(importConfigButton, gbc);
-
-        applyButton.addActionListener(e -> startLogging());
-        stopButton.addActionListener(e -> stopLogging());
+        // Add action listeners
         testConnectionButton.addActionListener(e -> testConnection());
+        startButton.addActionListener(e -> startForwarding());
+        stopButton.addActionListener(e -> stopForwarding());
+        addRuleButton.addActionListener(e -> addNewRule());
+        deleteRuleButton.addActionListener(e -> deleteSelectedRule());
+        saveConfigButton.addActionListener(e -> saveConfig());
         exportConfigButton.addActionListener(e -> exportConfig());
         importConfigButton.addActionListener(e -> importConfig());
-    }
 
-    private void addNewRule() {
-        String[] filterMethods = {"黑名单扩展名", "域名过滤", "HTTP方法过滤", "状态码过滤", "IP过滤"};
-        String filterMethod = (String) JOptionPane.showInputDialog(mainPanel, 
-            "选择过滤方法:", "添加新规则", JOptionPane.QUESTION_MESSAGE, null, 
-            filterMethods, filterMethods[0]);
-        
-        if (filterMethod != null) {
-            String rule = JOptionPane.showInputDialog(mainPanel, "输入规则:");
-            if (rule != null) {
-                int rowCount = ruleTableModel.getRowCount();
-                ruleTableModel.addRow(new Object[]{rowCount + 1, filterMethod, rule, true, ""});
-            }
-        }
-    }
-
-    private void deleteSelectedRule() {
-        int selectedRow = ruleTable.getSelectedRow();
-        if (selectedRow != -1) {
-            ruleTableModel.removeRow(selectedRow);
-            updateRuleNumbers();
-        } else {
-            JOptionPane.showMessageDialog(mainPanel, "请选择要删除的规则。", "错误", JOptionPane.ERROR_MESSAGE);
-        }
-    }
-
-    private void updateRuleNumbers() {
-        for (int i = 0; i < ruleTableModel.getRowCount(); i++) {
-            ruleTableModel.setValueAt(i + 1, i, 0);
-        }
-    }
-
-    private void startLogging() {
-        String serverIp = serverIpField.getText().trim();
-        String serverPort = serverPortField.getText().trim();
-
-        if (serverIp.isEmpty() || serverPort.isEmpty()) {
-            JOptionPane.showMessageDialog(mainPanel, "请输入服务器 IP 和端口。", "错误", JOptionPane.ERROR_MESSAGE);
-            return;
-        }
-
-        config.setProperty("forwardingIp", serverIp);
-        config.setProperty("forwardingPort", serverPort);
-
-        try {
-            logWriter = new PrintWriter(new FileWriter("http_log.txt", true), true);
-            isRunning = true;
-            applyButton.setEnabled(false);
-            stopButton.setEnabled(true);
-            JOptionPane.showMessageDialog(mainPanel, "日志记录已启动。", "信息", JOptionPane.INFORMATION_MESSAGE);
-        } catch (IOException e) {
-            JOptionPane.showMessageDialog(mainPanel, "启动日志记录时出错: " + e.getMessage(), "错误", JOptionPane.ERROR_MESSAGE);
-        }
-    }
-
-    private void stopLogging() {
-        isRunning = false;
-        if (logWriter != null) {
-            logWriter.close();
-        }
-        applyButton.setEnabled(true);
-        stopButton.setEnabled(false);
-        JOptionPane.showMessageDialog(mainPanel, "日志记录已停止。", "信息", JOptionPane.INFORMATION_MESSAGE);
+        callbacks.addSuiteTab(this);
     }
 
     private void testConnection() {
@@ -218,10 +156,91 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener {
         try {
             Socket socket = new Socket(serverIp, Integer.parseInt(serverPort));
             socket.close();
-            JOptionPane.showMessageDialog(mainPanel, "连接成功！", "信息", JOptionPane.INFORMATION_MESSAGE);
+            JOptionPane.showMessageDialog(mainPanel, "连接成功！", "测试结果", JOptionPane.INFORMATION_MESSAGE);
         } catch (Exception e) {
-            JOptionPane.showMessageDialog(mainPanel, "连接失败: " + e.getMessage(), "错误", JOptionPane.ERROR_MESSAGE);
+            JOptionPane.showMessageDialog(mainPanel, "连接失败: " + e.getMessage(), "测试结果", JOptionPane.ERROR_MESSAGE);
         }
+    }
+
+    private void addNewRule() {
+        String[] filterMethods = {"黑名单扩展名", "域名过滤", "HTTP方法过滤", "状态码过滤", "IP过滤"};
+        String filterMethod = (String) JOptionPane.showInputDialog(mainPanel, 
+            "选择过滤方法:", "添加新规则", JOptionPane.QUESTION_MESSAGE, null, 
+            filterMethods, filterMethods[0]);
+        
+        if (filterMethod != null) {
+            String rule = JOptionPane.showInputDialog(mainPanel, "输入规则:");
+            if (rule != null) {
+                int newRowIndex = ruleTableModel.getRowCount() + 1;
+                ruleTableModel.addRow(new Object[]{newRowIndex, filterMethod, rule, true, ""});
+            }
+        }
+    }
+
+    private void deleteSelectedRule() {
+        int selectedRow = ruleTable.getSelectedRow();
+        if (selectedRow != -1) {
+            ruleTableModel.removeRow(selectedRow);
+            // 重新编号
+            for (int i = 0; i < ruleTableModel.getRowCount(); i++) {
+                ruleTableModel.setValueAt(i + 1, i, 0);
+            }
+        } else {
+            JOptionPane.showMessageDialog(mainPanel, "请选择要删除的规则。", "错误", JOptionPane.ERROR_MESSAGE);
+        }
+    }
+
+    private void saveConfig() {
+        String serverIp = serverIpField.getText().trim();
+        String serverPort = serverPortField.getText().trim();
+
+        if (serverIp.isEmpty() || serverPort.isEmpty()) {
+            JOptionPane.showMessageDialog(mainPanel, "请输入服务器 IP 和端口。", "错误", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+
+        config.setProperty("forwardingIp", serverIp);
+        config.setProperty("forwardingPort", serverPort);
+
+        config.setProperty("ruleCount", String.valueOf(ruleTableModel.getRowCount()));
+        for (int i = 0; i < ruleTableModel.getRowCount(); i++) {
+            config.setProperty("rule_" + i + "_method", (String) ruleTableModel.getValueAt(i, 1));
+            config.setProperty("rule_" + i + "_rule", (String) ruleTableModel.getValueAt(i, 2));
+            config.setProperty("rule_" + i + "_status", String.valueOf(ruleTableModel.getValueAt(i, 3)));
+            config.setProperty("rule_" + i + "_note", (String) ruleTableModel.getValueAt(i, 4));
+        }
+
+        try (OutputStream output = new FileOutputStream("config.properties")) {
+            config.store(output, null);
+            JOptionPane.showMessageDialog(mainPanel, "配置已保存并启用。", "信息", JOptionPane.INFORMATION_MESSAGE);
+        } catch (IOException io) {
+            JOptionPane.showMessageDialog(mainPanel, "保存配置时出错: " + io.getMessage(), "错误", JOptionPane.ERROR_MESSAGE);
+        }
+    }
+
+    private void startForwarding() {
+        String serverIp = serverIpField.getText().trim();
+        String serverPort = serverPortField.getText().trim();
+
+        if (serverIp.isEmpty() || serverPort.isEmpty()) {
+            JOptionPane.showMessageDialog(mainPanel, "请输入服务器 IP 和端口。", "错误", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+
+        config.setProperty("forwardingIp", serverIp);
+        config.setProperty("forwardingPort", serverPort);
+
+        isRunning = true;
+        startButton.setEnabled(false);
+        stopButton.setEnabled(true);
+        JOptionPane.showMessageDialog(mainPanel, "转发已启动。", "信息", JOptionPane.INFORMATION_MESSAGE);
+    }
+
+    private void stopForwarding() {
+        isRunning = false;
+        startButton.setEnabled(true);
+        stopButton.setEnabled(false);
+        JOptionPane.showMessageDialog(mainPanel, "转发已停止。", "信息", JOptionPane.INFORMATION_MESSAGE);
     }
 
     private void exportConfig() {
@@ -284,7 +303,7 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener {
 
     @Override
     public String getTabCaption() {
-        return "HTTP Logger";
+        return "HTTP Forwarder";
     }
 
     @Override
@@ -328,26 +347,6 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener {
                             break;
                     }
                 }
-
-                // 记录日志
-                StringBuilder logEntry = new StringBuilder();
-                logEntry.append("URL: ").append(url).append("\n");
-                logEntry.append("Method: ").append(requestInfo.getMethod()).append("\n");
-                logEntry.append("Protocol: ").append(requestInfo.getUrl().getProtocol()).append("\n");
-                logEntry.append("Host: ").append(requestInfo.getUrl().getHost()).append("\n");
-                
-                if (!messageIsRequest) {
-                    logEntry.append("Status Code: ").append(responseInfo.getStatusCode()).append("\n");
-                }
-                
-                logEntry.append("Headers:\n");
-                for (String header : requestInfo.getHeaders()) {
-                    logEntry.append(header).append("\n");
-                }
-                
-                logEntry.append("\n");
-                logWriter.println(logEntry.toString());
-                logWriter.flush();
 
                 // 转发请求
                 String serverIp = config.getProperty("forwardingIp");
