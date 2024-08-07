@@ -28,8 +28,10 @@ public class BurpExtender implements IBurpExtender, IHttpListener, ITab {
         this.helpers = callbacks.getHelpers();
         callbacks.setExtensionName("Multithreaded Logger and Forwarder");
 
-        SwingUtilities.invokeLater(this::buildUI);
-        callbacks.addSuiteTab(this);
+        SwingUtilities.invokeLater(() -> {
+            buildUI();
+            callbacks.addSuiteTab(BurpExtender.this);
+        });
 
         executorService = Executors.newFixedThreadPool(10); // 使用10个线程的线程池
 
