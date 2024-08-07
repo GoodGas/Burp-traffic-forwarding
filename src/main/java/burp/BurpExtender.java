@@ -4,13 +4,14 @@ import javax.swing.*;
 import javax.swing.table.DefaultTableModel;
 import java.awt.*;
 import java.io.*;
+import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.text.SimpleDateFormat;
 import java.util.*;
 import java.util.List;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.*;
 
-public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtensionStateListener {
+public class BurpExtender implements IBurpExtender, IHttpListener, ITab {
     private IBurpExtenderCallbacks callbacks;
     private IExtensionHelpers helpers;
     private JPanel mainPanel;
@@ -19,297 +20,250 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
     private JButton testConnectionButton;
     private JButton startButton;
     private JButton stopButton;
+    private JButton addRuleButton;
+    private JButton deleteRuleButton;
     private JButton saveConfigButton;
     private JButton exportConfigButton;
     private JButton importConfigButton;
     private JTable ruleTable;
     private DefaultTableModel ruleTableModel;
-    private Properties config;
-    private boolean isRunning = false;
+    private String forwardingIp;
+    private int forwardingPort;
     private ExecutorService executorService;
+    private boolean isRunning = false;
+    private List<Rule> rules;
+    private Properties config;
+    private static final String CONFIG_FILE = "logger_forwarder_config.properties";
+    private BlockingQueue<String> logQueue;
+    private ScheduledExecutorService scheduledExecutorService;
 
     @Override
     public void registerExtenderCallbacks(IBurpExtenderCallbacks callbacks) {
         this.callbacks = callbacks;
         this.helpers = callbacks.getHelpers();
-        callbacks.setExtensionName("HTTP Forwarder");
+        callbacks.setExtensionName("增强型日志记录和转发器");
 
-        SwingUtilities.invokeLater(this::initializeUI);
-
-        executorService = Executors.newFixedThreadPool(10);
-        config = new Properties();
         loadConfig();
 
+        SwingUtilities.invokeLater(() -> {
+            buildUI();
+            callbacks.addSuiteTab(BurpExtender.this);
+        });
+
         callbacks.registerHttpListener(this);
-        callbacks.registerExtensionStateListener(this);
     }
 
-    private void initializeUI() {
-        mainPanel = new JPanel(new GridBagLayout());
-        GridBagConstraints gbc = new GridBagConstraints();
-        gbc.insets = new Insets(5, 5, 5, 5);
-        gbc.fill = GridBagConstraints.HORIZONTAL;
+    private void buildUI() {
+        mainPanel = new JPanel(new BorderLayout());
 
-        // First row
-        gbc.gridx = 0;
-        gbc.gridy = 0;
-        mainPanel.add(new JLabel("转发服务器 IP:"), gbc);
-
-        gbc.gridx = 1;
-        gbc.weightx = 1.0;
+        // 顶部面板
+        JPanel topPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        topPanel.add(new JLabel("转发服务器 IP:"));
         serverIpField = new JTextField(15);
         serverIpField.setText(config.getProperty("forwardingIp", ""));
-        mainPanel.add(serverIpField, gbc);
+        topPanel.add(serverIpField);
 
-        gbc.gridx = 2;
-        gbc.weightx = 0;
-        mainPanel.add(new JLabel("端口:"), gbc);
-
-        gbc.gridx = 3;
-        gbc.weightx = 0.5;
+        topPanel.add(new JLabel("端口:"));
         serverPortField = new JTextField(5);
         serverPortField.setText(config.getProperty("forwardingPort", ""));
-        mainPanel.add(serverPortField, gbc);
+        topPanel.add(serverPortField);
 
-        gbc.gridx = 4;
-        gbc.weightx = 0;
         testConnectionButton = new JButton("测试连接");
-        mainPanel.add(testConnectionButton, gbc);
+        topPanel.add(testConnectionButton);
 
-        gbc.gridx = 5;
         startButton = new JButton("开始连接");
-        mainPanel.add(startButton, gbc);
+        topPanel.add(startButton);
 
-        gbc.gridx = 6;
         stopButton = new JButton("停止连接");
         stopButton.setEnabled(false);
-        mainPanel.add(stopButton, gbc);
+        topPanel.add(stopButton);
 
-        // Second row
-        gbc.gridx = 0;
-        gbc.gridy = 1;
-        JButton addRuleButton = new JButton("添加规则");
-        mainPanel.add(addRuleButton, gbc);
+        mainPanel.add(topPanel, BorderLayout.NORTH);
 
-        gbc.gridx = 1;
-        JButton deleteRuleButton = new JButton("删除规则");
-        mainPanel.add(deleteRuleButton, gbc);
-
-        gbc.gridx = 2;
-        saveConfigButton = new JButton("保存配置");
-        mainPanel.add(saveConfigButton, gbc);
-
-        gbc.gridx = 3;
-        gbc.gridwidth = 2;
-        exportConfigButton = new JButton("导出配置");
-        mainPanel.add(exportConfigButton, gbc);
-
-        gbc.gridx = 5;
-        gbc.gridwidth = 2;
-        importConfigButton = new JButton("导入配置");
-        mainPanel.add(importConfigButton, gbc);
-
-        // Rule table
-        gbc.gridx = 0;
-        gbc.gridy = 2;
-        gbc.gridwidth = 7;
-        gbc.weighty = 1.0;
-        gbc.fill = GridBagConstraints.BOTH;
-        
+        // 中间规则表
         String[] columnNames = {"序号", "过滤方法", "过滤规则", "规则状态", "规则备注"};
-        ruleTableModel = new DefaultTableModel(columnNames, 0) {
-            @Override
-            public Class<?> getColumnClass(int column) {
-                if (column == 3) return Boolean.class;
-                return super.getColumnClass(column);
-            }
-            @Override
-            public boolean isCellEditable(int row, int column) {
-                return column != 0; // 序号列不可编辑
-            }
-        };
+        ruleTableModel = new DefaultTableModel(columnNames, 0);
         ruleTable = new JTable(ruleTableModel);
         JScrollPane scrollPane = new JScrollPane(ruleTable);
-        mainPanel.add(scrollPane, gbc);
+        mainPanel.add(scrollPane, BorderLayout.CENTER);
 
-        // Add action listeners
+        // 底部按钮面板
+        JPanel bottomPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        addRuleButton = new JButton("添加规则");
+        bottomPanel.add(addRuleButton);
+
+        deleteRuleButton = new JButton("删除规则");
+        bottomPanel.add(deleteRuleButton);
+
+        saveConfigButton = new JButton("保存配置");
+        bottomPanel.add(saveConfigButton);
+
+        exportConfigButton = new JButton("导出配置");
+        bottomPanel.add(exportConfigButton);
+
+        importConfigButton = new JButton("导入配置");
+        bottomPanel.add(importConfigButton);
+
+        mainPanel.add(bottomPanel, BorderLayout.SOUTH);
+
+        // 添加事件监听器
         testConnectionButton.addActionListener(e -> testConnection());
-        startButton.addActionListener(e -> startForwarding());
-        stopButton.addActionListener(e -> stopForwarding());
-        addRuleButton.addActionListener(e -> addNewRule());
-        deleteRuleButton.addActionListener(e -> deleteSelectedRule());
+        startButton.addActionListener(e -> startLogging());
+        stopButton.addActionListener(e -> stopLogging());
+        addRuleButton.addActionListener(e -> addRule());
+        deleteRuleButton.addActionListener(e -> deleteRule());
         saveConfigButton.addActionListener(e -> saveConfig());
         exportConfigButton.addActionListener(e -> exportConfig());
         importConfigButton.addActionListener(e -> importConfig());
 
-        callbacks.addSuiteTab(this);
+        // 加载已保存的规则
+        loadRules();
     }
 
-    private void testConnection() {
-        String serverIp = serverIpField.getText().trim();
-        String serverPort = serverPortField.getText().trim();
-
-        if (serverIp.isEmpty() || serverPort.isEmpty()) {
-            JOptionPane.showMessageDialog(mainPanel, "请输入服务器 IP 和端口。", "错误", JOptionPane.ERROR_MESSAGE);
-            return;
+    private void loadConfig() {
+        config = new Properties();
+        try (FileInputStream in = new FileInputStream(CONFIG_FILE)) {
+            config.load(in);
+        } catch (IOException e) {
+            callbacks.printError("无法加载配置文件: " + e.getMessage());
         }
-
-        try {
-            Socket socket = new Socket(serverIp, Integer.parseInt(serverPort));
-            socket.close();
-            JOptionPane.showMessageDialog(mainPanel, "连接成功！", "测试结果", JOptionPane.INFORMATION_MESSAGE);
-        } catch (Exception e) {
-            JOptionPane.showMessageDialog(mainPanel, "连接失败: " + e.getMessage(), "测试结果", JOptionPane.ERROR_MESSAGE);
-        }
+        rules = new ArrayList<>();
     }
 
-    private void addNewRule() {
-        String[] filterMethods = {"黑名单扩展名", "域名过滤", "HTTP方法过滤", "状态码过滤", "IP过滤"};
-        String filterMethod = (String) JOptionPane.showInputDialog(mainPanel, 
-            "选择过滤方法:", "添加新规则", JOptionPane.QUESTION_MESSAGE, null, 
-            filterMethods, filterMethods[0]);
+    private void saveConfig() {
+        config.setProperty("forwardingIp", forwardingIp);
+        config.setProperty("forwardingPort", String.valueOf(forwardingPort));
         
-        if (filterMethod != null) {
-            String rule = JOptionPane.showInputDialog(mainPanel, "输入规则:");
-            if (rule != null) {
-                int newRowIndex = ruleTableModel.getRowCount() + 1;
-                ruleTableModel.addRow(new Object[]{newRowIndex, filterMethod, rule, true, ""});
+        // 保存规则
+        StringBuilder rulesStr = new StringBuilder();
+        for (Rule rule : rules) {
+            rulesStr.append(rule.toString()).append(";");
+        }
+        config.setProperty("rules", rulesStr.toString());
+
+        try (FileOutputStream out = new FileOutputStream(CONFIG_FILE)) {
+            config.store(out, "日志记录和转发器配置");
+            JOptionPane.showMessageDialog(mainPanel, "配置已成功保存！");
+        } catch (IOException e) {
+            callbacks.printError("无法保存配置文件: " + e.getMessage());
+            JOptionPane.showMessageDialog(mainPanel, "保存配置失败: " + e.getMessage());
+        }
+    }
+
+    private void loadRules() {
+        String rulesStr = config.getProperty("rules", "");
+        String[] ruleStrings = rulesStr.split(";");
+        for (String ruleStr : ruleStrings) {
+            if (!ruleStr.isEmpty()) {
+                Rule rule = Rule.fromString(ruleStr);
+                rules.add(rule);
+                addRuleToTable(rule);
             }
         }
     }
 
-    private void deleteSelectedRule() {
+    private void addRuleToTable(Rule rule) {
+        ruleTableModel.addRow(new Object[]{
+            ruleTableModel.getRowCount() + 1,
+            rule.getFilterType(),
+            rule.getFilterRule(),
+            rule.isEnabled() ? "Open" : "Closed",
+            rule.getComment()
+        });
+    }
+
+    private void addRule() {
+        String[] filterTypes = {"黑名单扩展名", "域名过滤", "HTTP方法过滤", "状态码过滤", "IP过滤"};
+        JComboBox<String> filterTypeCombo = new JComboBox<>(filterTypes);
+        JTextField filterRuleField = new JTextField(20);
+        JCheckBox enabledCheckBox = new JCheckBox("启用", true);
+        JTextField commentField = new JTextField(20);
+
+        JPanel panel = new JPanel(new GridLayout(0, 1));
+        panel.add(new JLabel("过滤方法:"));
+        panel.add(filterTypeCombo);
+        panel.add(new JLabel("过滤规则:"));
+        panel.add(filterRuleField);
+        panel.add(enabledCheckBox);
+        panel.add(new JLabel("规则备注:"));
+        panel.add(commentField);
+
+        int result = JOptionPane.showConfirmDialog(mainPanel, panel, "添加规则",
+                JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
+        if (result == JOptionPane.OK_OPTION) {
+            Rule rule = new Rule(
+                (String) filterTypeCombo.getSelectedItem(),
+                filterRuleField.getText(),
+                enabledCheckBox.isSelected(),
+                commentField.getText()
+            );
+            rules.add(rule);
+            addRuleToTable(rule);
+        }
+    }
+
+    private void deleteRule() {
         int selectedRow = ruleTable.getSelectedRow();
         if (selectedRow != -1) {
+            rules.remove(selectedRow);
             ruleTableModel.removeRow(selectedRow);
-            // 重新编号
+            // 更新序号
             for (int i = 0; i < ruleTableModel.getRowCount(); i++) {
                 ruleTableModel.setValueAt(i + 1, i, 0);
             }
         } else {
-            JOptionPane.showMessageDialog(mainPanel, "请选择要删除的规则。", "错误", JOptionPane.ERROR_MESSAGE);
+            JOptionPane.showMessageDialog(mainPanel, "请选择要删除的规则。");
         }
     }
 
-    private void saveConfig() {
-        String serverIp = serverIpField.getText().trim();
-        String serverPort = serverPortField.getText().trim();
-
-        if (serverIp.isEmpty() || serverPort.isEmpty()) {
-            JOptionPane.showMessageDialog(mainPanel, "请输入服务器 IP 和端口。", "错误", JOptionPane.ERROR_MESSAGE);
+    private void startLogging() {
+        forwardingIp = serverIpField.getText().trim();
+        if (forwardingIp.isEmpty()) {
+            JOptionPane.showMessageDialog(mainPanel, "请输入有效的转发 IP 地址。");
             return;
         }
 
-        config.setProperty("forwardingIp", serverIp);
-        config.setProperty("forwardingPort", serverPort);
-
-        config.setProperty("ruleCount", String.valueOf(ruleTableModel.getRowCount()));
-        for (int i = 0; i < ruleTableModel.getRowCount(); i++) {
-            config.setProperty("rule_" + i + "_method", (String) ruleTableModel.getValueAt(i, 1));
-            config.setProperty("rule_" + i + "_rule", (String) ruleTableModel.getValueAt(i, 2));
-            config.setProperty("rule_" + i + "_status", String.valueOf(ruleTableModel.getValueAt(i, 3)));
-            config.setProperty("rule_" + i + "_note", (String) ruleTableModel.getValueAt(i, 4));
-        }
-
-        try (OutputStream output = new FileOutputStream("config.properties")) {
-            config.store(output, null);
-            JOptionPane.showMessageDialog(mainPanel, "配置已保存并启用。", "信息", JOptionPane.INFORMATION_MESSAGE);
-        } catch (IOException io) {
-            JOptionPane.showMessageDialog(mainPanel, "保存配置时出错: " + io.getMessage(), "错误", JOptionPane.ERROR_MESSAGE);
-        }
-    }
-
-    private void startForwarding() {
-        String serverIp = serverIpField.getText().trim();
-        String serverPort = serverPortField.getText().trim();
-
-        if (serverIp.isEmpty() || serverPort.isEmpty()) {
-            JOptionPane.showMessageDialog(mainPanel, "请输入服务器 IP 和端口。", "错误", JOptionPane.ERROR_MESSAGE);
+        try {
+            forwardingPort = Integer.parseInt(serverPortField.getText().trim());
+            if (forwardingPort <= 0 || forwardingPort > 65535) {
+                throw new NumberFormatException();
+            }
+        } catch (NumberFormatException e) {
+            JOptionPane.showMessageDialog(mainPanel, "请输入有效的端口号 (1-65535)。");
             return;
         }
 
-        config.setProperty("forwardingIp", serverIp);
-        config.setProperty("forwardingPort", serverPort);
+        saveConfig();
+
+        logQueue = new LinkedBlockingQueue<>(1000);
+        executorService = Executors.newFixedThreadPool(10);
+        scheduledExecutorService = Executors.newSingleThreadScheduledExecutor();
+        scheduledExecutorService.scheduleAtFixedRate(this::sendLogs, 0, 5, TimeUnit.SECONDS);
 
         isRunning = true;
         startButton.setEnabled(false);
         stopButton.setEnabled(true);
-        JOptionPane.showMessageDialog(mainPanel, "转发已启动。", "信息", JOptionPane.INFORMATION_MESSAGE);
+        JOptionPane.showMessageDialog(mainPanel, "日志记录已成功启动！");
     }
 
-    private void stopForwarding() {
+    private void stopLogging() {
         isRunning = false;
+        if (executorService != null) {
+            executorService.shutdown();
+            try {
+                if (!executorService.awaitTermination(800, TimeUnit.MILLISECONDS)) {
+                    executorService.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                executorService.shutdownNow();
+            }
+        }
+        if (scheduledExecutorService != null) {
+            scheduledExecutorService.shutdown();
+        }
         startButton.setEnabled(true);
         stopButton.setEnabled(false);
-        JOptionPane.showMessageDialog(mainPanel, "转发已停止。", "信息", JOptionPane.INFORMATION_MESSAGE);
-    }
-
-    private void exportConfig() {
-        JFileChooser fileChooser = new JFileChooser();
-        if (fileChooser.showSaveDialog(mainPanel) == JFileChooser.APPROVE_OPTION) {
-            File file = fileChooser.getSelectedFile();
-            try (ObjectOutputStream oos = new ObjectOutputStream(new FileOutputStream(file))) {
-                Properties exportConfig = new Properties();
-                exportConfig.putAll(config);
-                exportConfig.setProperty("ruleCount", String.valueOf(ruleTableModel.getRowCount()));
-                for (int i = 0; i < ruleTableModel.getRowCount(); i++) {
-                    exportConfig.setProperty("rule_" + i + "_method", (String) ruleTableModel.getValueAt(i, 1));
-                    exportConfig.setProperty("rule_" + i + "_rule", (String) ruleTableModel.getValueAt(i, 2));
-                    exportConfig.setProperty("rule_" + i + "_status", String.valueOf(ruleTableModel.getValueAt(i, 3)));
-                    exportConfig.setProperty("rule_" + i + "_note", (String) ruleTableModel.getValueAt(i, 4));
-                }
-                oos.writeObject(exportConfig);
-                JOptionPane.showMessageDialog(mainPanel, "配置已成功导出。", "信息", JOptionPane.INFORMATION_MESSAGE);
-            } catch (IOException e) {
-                JOptionPane.showMessageDialog(mainPanel, "导出配置时出错: " + e.getMessage(), "错误", JOptionPane.ERROR_MESSAGE);
-            }
-        }
-    }
-
-    private void importConfig() {
-        JFileChooser fileChooser = new JFileChooser();
-        if (fileChooser.showOpenDialog(mainPanel) == JFileChooser.APPROVE_OPTION) {
-            File file = fileChooser.getSelectedFile();
-            try (ObjectInputStream ois = new ObjectInputStream(new FileInputStream(file))) {
-                Properties importedConfig = (Properties) ois.readObject();
-                config.clear();
-                config.putAll(importedConfig);
-                serverIpField.setText(config.getProperty("forwardingIp", ""));
-                serverPortField.setText(config.getProperty("forwardingPort", ""));
-
-                ruleTableModel.setRowCount(0);
-                int ruleCount = Integer.parseInt(config.getProperty("ruleCount", "0"));
-                for (int i = 0; i < ruleCount; i++) {
-                    String method = config.getProperty("rule_" + i + "_method");
-                    String rule = config.getProperty("rule_" + i + "_rule");
-                    boolean status = Boolean.parseBoolean(config.getProperty("rule_" + i + "_status"));
-                    String note = config.getProperty("rule_" + i + "_note");
-                    ruleTableModel.addRow(new Object[]{i + 1, method, rule, status, note});
-                }
-
-                JOptionPane.showMessageDialog(mainPanel, "配置已成功导入。", "信息", JOptionPane.INFORMATION_MESSAGE);
-            } catch (IOException | ClassNotFoundException e) {
-                JOptionPane.showMessageDialog(mainPanel, "导入配置时出错: " + e.getMessage(), "错误", JOptionPane.ERROR_MESSAGE);
-            }
-        }
-    }
-
-    private void loadConfig() {
-        try (InputStream input = new FileInputStream("config.properties")) {
-            config.load(input);
-        } catch (IOException ex) {
-            callbacks.printError("加载配置文件时出错: " + ex.getMessage());
-        }
-    }
-
-    @Override
-    public String getTabCaption() {
-        return "HTTP Forwarder";
-    }
-
-    @Override
-    public Component getUiComponent() {
-        return mainPanel;
+        JOptionPane.showMessageDialog(mainPanel, "日志记录已成功停止！");
     }
 
     @Override
@@ -322,66 +276,184 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
                 IResponseInfo responseInfo = messageIsRequest ? null : helpers.analyzeResponse(messageInfo.getResponse());
                 String url = requestInfo.getUrl().toString().toLowerCase();
                 
-                // 应用过滤规则
-                for (int i = 0; i < ruleTableModel.getRowCount(); i++) {
-                    String filterMethod = (String) ruleTableModel.getValueAt(i, 1);
-                    String rule = (String) ruleTableModel.getValueAt(i, 2);
-                    boolean isActive = (Boolean) ruleTableModel.getValueAt(i, 3);
-                    
-                    if (!isActive) continue;
-                    
-                    switch (filterMethod) {
+                for (Rule rule : rules) {
+                    if (!rule.isEnabled()) continue;
+
+                    switch (rule.getFilterType()) {
                         case "黑名单扩展名":
-                            if (url.endsWith(rule.trim().toLowerCase())) return;
+                            if (url.endsWith(rule.getFilterRule().toLowerCase())) return;
                             break;
                         case "域名过滤":
-                            if (!url.matches(rule)) return;
+                            if (!url.matches(rule.getFilterRule())) return;
                             break;
                         case "HTTP方法过滤":
-                            if (!requestInfo.getMethod().equalsIgnoreCase(rule.trim())) return;
+                            if (!requestInfo.getMethod().equalsIgnoreCase(rule.getFilterRule())) return;
                             break;
                         case "状态码过滤":
-                            if (!messageIsRequest && !String.valueOf(responseInfo.getStatusCode()).equals(rule.trim())) return;
+                            if (!messageIsRequest && responseInfo.getStatusCode() != Integer.parseInt(rule.getFilterRule())) return;
                             break;
                         case "IP过滤":
-                            if (!requestInfo.getUrl().getHost().equals(rule.trim())) return;
+                            if (!requestInfo.getUrl().getHost().equals(rule.getFilterRule())) return;
                             break;
                     }
                 }
 
-                // 转发请求
-                String serverIp = config.getProperty("forwardingIp");
-                int serverPort = Integer.parseInt(config.getProperty("forwardingPort"));
-                forwardRequest(messageInfo, serverIp, serverPort);
+                String toolName = callbacks.getToolName(toolFlag);
+                String messageType = messageIsRequest ? "请求" : "响应";
+                String timestamp = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS").format(new Date());
 
+                StringBuilder logMessage = new StringBuilder();
+                logMessage.append(String.format("[%s] [%s] [%s]\n", timestamp, toolName, messageType));
+                logMessage.append(String.format("URL: %s\n", requestInfo.getUrl()));
+                logMessage.append(String.format("方法: %s\n", requestInfo.getMethod()));
+
+                if (!messageIsRequest) {
+                    logMessage.append(String.format("状态码: %d\n", responseInfo.getStatusCode()));
+                }
+
+                byte[] message = messageIsRequest ? messageInfo.getRequest() : messageInfo.getResponse();
+                logMessage.append(new String(message));
+                logMessage.append("\n\n");
+
+                logQueue.offer(logMessage.toString());
             } catch (Exception e) {
                 callbacks.printError("处理 HTTP 消息时出错: " + e.getMessage());
             }
         });
     }
 
-    private void forwardRequest(IHttpRequestResponse messageInfo, String serverIp, int serverPort) {
-        try (Socket socket = new Socket(serverIp, serverPort)) {
-            OutputStream os = socket.getOutputStream();
-            os.write(messageInfo.getRequest());
-            os.flush();
+    private void sendLogs() {
+        List<String> logs = new ArrayList<>();
+        logQueue.drainTo(logs);
 
-            InputStream is = socket.getInputStream();
-            ByteArrayOutputStream baos = new ByteArrayOutputStream();
-            byte[] buffer = new byte[4096];
-            int bytesRead;
-            while ((bytesRead = is.read(buffer)) != -1) {
-                baos.write(buffer, 0, bytesRead);
+        if (!logs.isEmpty()) {
+            try (Socket socket = new Socket()) {
+                socket.connect(new InetSocketAddress(forwardingIp, forwardingPort), 5000);
+                try (OutputStream out = socket.getOutputStream()) {
+                    for (String log : logs) {
+                        out.write(log.getBytes());
+                    }
+                    out.flush();
+                }
+            } catch (IOException e) {
+                callbacks.printError("转发日志时出错: " + e.getMessage());
             }
-
-            messageInfo.setResponse(baos.toByteArray());
-        } catch (IOException e) {
-            callbacks.printError("转发请求时出错: " + e.getMessage());
         }
     }
 
+    private void testConnection() {
+        String ip = serverIpField.getText().trim();
+        String portStr = serverPortField.getText().trim();
+
+        if (ip.isEmpty() || portStr.isEmpty()) {
+            JOptionPane.showMessageDialog(mainPanel, "请输入服务器 IP 和端口。");
+            return;
+        }
+
+        int port;
+        try {
+            port = Integer.parseInt(portStr);
+        } catch (NumberFormatException e) {
+            JOptionPane.showMessageDialog(mainPanel, "请输入有效的端口号。");
+            return;
+        }
+
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress(ip, port), 5000);
+            JOptionPane.showMessageDialog(mainPanel, "连接成功！");
+        } catch (IOException e) {
+            JOptionPane.showMessageDialog(mainPanel, "连接失败: " + e.getMessage());
+        }
+    }
+
+    private void exportConfig() {
+        JFileChooser fileChooser = new JFileChooser();
+        fileChooser.setDialogTitle("选择导出位置");
+        if (fileChooser.showSaveDialog(mainPanel) == JFileChooser.APPROVE_OPTION) {
+            File file = fileChooser.getSelectedFile();
+            try (FileOutputStream out = new FileOutputStream(file)) {
+                config.store(out, "日志记录和转发器配置");
+                JOptionPane.showMessageDialog(mainPanel, "配置已成功导出！");
+            } catch (IOException e) {
+                JOptionPane.showMessageDialog(mainPanel, "导出配置时出错: " + e.getMessage());
+            }
+        }
+    }
+
+    private void importConfig() {
+        JFileChooser fileChooser = new JFileChooser();
+        fileChooser.setDialogTitle("选择要导入的配置文件");
+        if (fileChooser.showOpenDialog(mainPanel) == JFileChooser.APPROVE_OPTION) {
+            File file = fileChooser.getSelectedFile();
+            try (FileInputStream in = new FileInputStream(file)) {
+                config.load(in);
+                updateUIFromConfig();
+                JOptionPane.showMessageDialog(mainPanel, "配置已成功导入！");
+            } catch (IOException e) {
+                JOptionPane.showMessageDialog(mainPanel, "导入配置时出错: " + e.getMessage());
+            }
+        }
+    }
+
+    private void updateUIFromConfig() {
+        serverIpField.setText(config.getProperty("forwardingIp", ""));
+        serverPortField.setText(config.getProperty("forwardingPort", ""));
+        
+        // 清空规则表
+        ruleTableModel.setRowCount(0);
+        rules.clear();
+        
+        // 重新加载规则
+        loadRules();
+    }
+
     @Override
-    public void extensionUnloaded() {
-        executorService.shutdown();
+    public String getTabCaption() {
+        return "日志记录和转发";
+    }
+
+    @Override
+    public Component getUiComponent() {
+        return mainPanel;
+    }
+
+    private static class Rule {
+        private String filterType;
+        private String filterRule;
+        private boolean enabled;
+        private String comment;
+
+        public Rule(String filterType, String filterRule, boolean enabled, String comment) {
+            this.filterType = filterType;
+            this.filterRule = filterRule;
+            this.enabled = enabled;
+            this.comment = comment;
+        }
+
+        public String getFilterType() {
+            return filterType;
+        }
+
+        public String getFilterRule() {
+            return filterRule;
+        }
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public String getComment() {
+            return comment;
+        }
+
+        @Override
+        public String toString() {
+            return filterType + "," + filterRule + "," + enabled + "," + comment;
+        }
+
+        public static Rule fromString(String str) {
+            String[] parts = str.split(",");
+            return new Rule(parts[0], parts[1], Boolean.parseBoolean(parts[2]), parts[3]);
+        }
     }
 }
