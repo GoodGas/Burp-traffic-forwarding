@@ -10,7 +10,7 @@ import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-public class BurpExtender implements IBurpExtender, ITab, IHttpListener {
+public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtensionStateListener {
     private IBurpExtenderCallbacks callbacks;
     private IExtensionHelpers helpers;
     private JPanel mainPanel;
@@ -41,6 +41,7 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener {
         loadConfig();
 
         callbacks.registerHttpListener(this);
+        callbacks.registerExtensionStateListener(this);
     }
 
     private void initializeUI() {
@@ -377,5 +378,10 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener {
         } catch (IOException e) {
             callbacks.printError("转发请求时出错: " + e.getMessage());
         }
+    }
+
+    @Override
+    public void extensionUnloaded() {
+        executorService.shutdown();
     }
 }
