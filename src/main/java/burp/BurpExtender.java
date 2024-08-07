@@ -1,4 +1,4 @@
-import burp.*;
+package burp;
 
 import javax.swing.*;
 import javax.swing.table.DefaultTableModel;
@@ -10,7 +10,7 @@ import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-public class ImprovedBurpExtender implements IBurpExtender, ITab, IHttpListener {
+public class BurpExtender implements IBurpExtender, ITab, IHttpListener {
     private IBurpExtenderCallbacks callbacks;
     private IExtensionHelpers helpers;
     private JPanel mainPanel;
