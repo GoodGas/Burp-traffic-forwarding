@@ -32,6 +32,7 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
     private Socket persistentSocket;
     private OutputStream persistentOutputStream;
     private InputStream persistentInputStream;
+    private Map<IHttpRequestResponse, byte[]> requestResponseMap;
 
     @Override
     public void registerExtenderCallbacks(IBurpExtenderCallbacks callbacks) {
@@ -44,6 +45,8 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
         executorService = Executors.newFixedThreadPool(10);
         config = new Properties();
         loadConfig();
+
+        requestResponseMap = new HashMap<>();
 
         callbacks.registerHttpListener(this);
         callbacks.registerExtensionStateListener(this);
@@ -365,66 +368,93 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
 
         executorService.submit(() -> {
             try {
-                IRequestInfo requestInfo = helpers.analyzeRequest(messageInfo);
-                IResponseInfo responseInfo = messageIsRequest ? null : helpers.analyzeResponse(messageInfo.getResponse());
-                String url = requestInfo.getUrl().toString().toLowerCase();
-                
-                // 应用过滤规则
-                for (int i = 0; i < ruleTableModel.getRowCount(); i++) {
-                    String filterMethod = (String) ruleTableModel.getValueAt(i, 1);
-                    String rule = (String) ruleTableModel.getValueAt(i, 2);
-                    boolean isActive = (Boolean) ruleTableModel.getValueAt(i, 3);
-                    
-                    if (!isActive) continue;
-                    
-                    switch (filterMethod) {
-                        case "黑名单扩展名":
-                            if (url.endsWith(rule.trim().toLowerCase())) return;
-                            break;
-                        case "域名过滤":
-                            if (!url.matches(rule)) return;
-                            break;
-                        case "HTTP方法过滤":
-                            if (!requestInfo.getMethod().equalsIgnoreCase(rule.trim())) return;
-                            break;
-                        case "状态码过滤":
-                            if (!messageIsRequest && !String.valueOf(responseInfo.getStatusCode()).equals(rule.trim())) return;
-                            break;
-                        case "IP过滤":
-                            if (!requestInfo.getUrl().getHost().equals(rule.trim())) return;
-                            break;
+                if (messageIsRequest) {
+                    // 处理请求
+                    IRequestInfo requestInfo = helpers.analyzeRequest(messageInfo);
+                    String url = requestInfo.getUrl().toString().toLowerCase();
+
+                    // 应用过滤规则
+                    if (shouldFilter(requestInfo, null)) {
+                        // 如果请求被过滤，将其添加到 map 中，值为 null
+                        requestResponseMap.put(messageInfo, null);
+                        return;
                     }
+
+                    // 转发请求
+                    byte[] modifiedRequest = forwardRequest(messageInfo.getRequest());
+                    // 将原始请求和修改后的请求存储在 map 中
+                    requestResponseMap.put(messageInfo, modifiedRequest);
+                } else {
+                    // 处理响应
+                    byte[] originalRequest = requestResponseMap.get(messageInfo);
+                    if (originalRequest == null) {
+                        // 如果对应的请求被过滤，则不处理此响应
+                        return;
+                    }
+
+                    IResponseInfo responseInfo = helpers.analyzeResponse(messageInfo.getResponse());
+                    
+                    // 再次应用过滤规则（针对响应）
+                    IRequestInfo requestInfo = helpers.analyzeRequest(originalRequest);
+                    if (shouldFilter(requestInfo, responseInfo)) {
+                        // 如果响应被过滤，从 map 中移除
+                        requestResponseMap.remove(messageInfo);
+                        return;
+                    }
+
+                    // 转发响应
+                    byte[] modifiedResponse = forwardResponse(messageInfo.getResponse());
+                    messageInfo.setResponse(modifiedResponse);
+
+                    // 处理完毕，从 map 中移除
+                    requestResponseMap.remove(messageInfo);
                 }
-
-                // 转发请求
-                forwardRequest(messageInfo);
-
             } catch (Exception e) {
                 callbacks.printError("处理 HTTP 消息时出错: " + e.getMessage());
             }
         });
     }
 
-    private void forwardRequest(IHttpRequestResponse messageInfo) {
-        try {
-            persistentOutputStream.write(messageInfo.getRequest());
-            persistentOutputStream.flush();
-
-            ByteArrayOutputStream baos = new ByteArrayOutputStream();
-            byte[] buffer = new byte[4096];
-            int bytesRead;
-            while ((bytesRead = persistentInputStream.read(buffer)) != -1) {
-                baos.write(buffer, 0, bytesRead);
-                if (persistentInputStream.available() == 0) break;
+    private boolean shouldFilter(IRequestInfo requestInfo, IResponseInfo responseInfo) {
+        String url = requestInfo.getUrl().toString().toLowerCase();
+        
+        for (int i = 0; i < ruleTableModel.getRowCount(); i++) {
+            String filterMethod = (String) ruleTableModel.getValueAt(i, 1);
+            String rule = (String) ruleTableModel.getValueAt(i, 2);
+            boolean isActive = (Boolean) ruleTableModel.getValueAt(i, 3);
+            
+            if (!isActive) continue;
+            
+            switch (filterMethod) {
+                case "黑名单扩展名":
+                    if (url.endsWith(rule.trim().toLowerCase())) return true;
+                    break;
+                case "域名过滤":
+                    if (url.matches(rule)) return true;
+                    break;
+                case "HTTP方法过滤":
+                    if (requestInfo.getMethod().equalsIgnoreCase(rule.trim())) return true;
+                    break;
+                case "状态码过滤":
+                    if (responseInfo != null && String.valueOf(responseInfo.getStatusCode()).equals(rule.trim())) return true;
+                    break;
+                case "IP过滤":
+                    if (requestInfo.getUrl().getHost().equals(rule.trim())) return true;
+                    break;
             }
-
-            messageInfo.setResponse(baos.toByteArray());
-        } catch (IOException e) {
-            callbacks.printError("转发请求时出错: " + e.getMessage());
-            // 如果出现错误，尝试重新建立连接
-            stopForwarding();
-            startForwarding();
         }
+        return false;
+    }
+
+    private byte[] forwardRequest(byte[] request) throws IOException {
+        persistentOutputStream.write(request);
+        persistentOutputStream.flush();
+        return request; // 返回可能被修改的请求
+    }
+
+    private byte[] forwardResponse(byte[] response) throws IOException {
+        // 这里可以添加对响应的处理逻辑
+        return response; // 返回可能被修改的响应
     }
 
     @Override
