@@ -58,6 +58,9 @@ public class BurpExtender implements BurpExtension {
     private static final String REQUEST_PREFIX = "REQUEST:";
     private static final String RESPONSE_PREFIX = "RESPONSE:";
     private final ConcurrentHashMap<String, HttpRequestResponse> requestResponseMap = new ConcurrentHashMap<>();
+    private final AtomicInteger sequentialCounter = new AtomicInteger(0);
+    private final List<String> orderedMessages = Collections.synchronizedList(new ArrayList<>());
+    private final ConcurrentHashMap<String, Integer> requestKeyToSequentialId = new ConcurrentHashMap<>();
 
     @Override
     public void initialize(MontoyaApi api) {
@@ -391,6 +394,8 @@ public class BurpExtender implements BurpExtension {
                 }
 
                 String requestKey = generateRequestKey(requestToBeSent);
+                int sequentialId = sequentialCounter.getAndIncrement();
+                requestKeyToSequentialId.put(requestKey, sequentialId);
 
                 if (shouldFilter) {
                     filteredRequests.add(requestKey);
@@ -401,15 +406,15 @@ public class BurpExtender implements BurpExtension {
                 responseMap.put(requestKey, responseFuture);
 
                 byte[] requestData = requestBytes.getBytes();
-                byte[] keyBytes = requestKey.getBytes();
 
                 synchronized (persistentOutputStream) {
-                    persistentOutputStream.write((REQUEST_PREFIX + requestKey + "\n").getBytes());
-                    persistentOutputStream.write(keyBytes);
-                    persistentOutputStream.write(requestData);
+                    String message = String.format("%s%d\n%s", REQUEST_PREFIX, sequentialId, requestToBeSent.toString());
+                    persistentOutputStream.write(message.getBytes());
                     persistentOutputStream.write(MESSAGE_SEPARATOR);
                     persistentOutputStream.flush();
                 }
+
+                orderedMessages.add(String.format("%s%d", REQUEST_PREFIX, sequentialId));
 
                 // 存储请求和响应的映射关系
                 requestResponseMap.put(requestKey, HttpRequestResponse.httpRequestResponse(requestToBeSent, null));
@@ -428,69 +433,74 @@ public class BurpExtender implements BurpExtension {
         });
     }
 
-   private void processResponse(HttpResponseReceived responseReceived) {
-    if (!isRunning || persistentSocket == null || persistentSocket.isClosed()) return;
+    private void processResponse(HttpResponseReceived responseReceived) {
+        if (!isRunning || persistentSocket == null || persistentSocket.isClosed()) return;
 
-    executorService.submit(() -> {
-        try {
-            ByteArray responseBytes = responseReceived.toByteArray();
-            int statusCode = responseReceived.statusCode();
+        executorService.submit(() -> {
+            try {
+                ByteArray responseBytes = responseReceived.toByteArray();
+                int statusCode = responseReceived.statusCode();
 
-            String requestKey = generateRequestKey(responseReceived.initiatingRequest());
+                String requestKey = generateRequestKey(responseReceived.initiatingRequest());
+                Integer sequentialId = requestKeyToSequentialId.get(requestKey);
 
-            if (filteredRequests.remove(requestKey)) {
-                return;
-            }
-
-            boolean shouldFilter = false;
-            for (int i = 0; i < ruleTableModel.getRowCount(); i++) {
-                String filterMethod = (String) ruleTableModel.getValueAt(i, 1);
-                String rule = (String) ruleTableModel.getValueAt(i, 2);
-                boolean isActive = (Boolean) ruleTableModel.getValueAt(i, 3);
-
-                if (!isActive) continue;
-
-                if (filterMethod.equals("状态码过滤") && String.valueOf(statusCode).equals(rule.trim())) {
-                    shouldFilter = true;
-                    break;
+                if (sequentialId == null) {
+                    logger.warning("未找到匹配的请求ID: " + requestKey);
+                    return;
                 }
-            }
 
-            if (shouldFilter) {
-                return;
-            }
+                if (filteredRequests.remove(requestKey)) {
+                    return;
+                }
 
-            byte[] responseData = responseBytes.getBytes();
-            byte[] keyBytes = requestKey.getBytes();
+                boolean shouldFilter = false;
+                for (int i = 0; i < ruleTableModel.getRowCount(); i++) {
+                    String filterMethod = (String) ruleTableModel.getValueAt(i, 1);
+                    String rule = (String) ruleTableModel.getValueAt(i, 2);
+                    boolean isActive = (Boolean) ruleTableModel.getValueAt(i, 3);
 
-            synchronized (persistentOutputStream) {
-                persistentOutputStream.write((RESPONSE_PREFIX + requestKey + "\n").getBytes());
-                persistentOutputStream.write(keyBytes);
-                persistentOutputStream.write(responseData);
-                persistentOutputStream.write(MESSAGE_SEPARATOR);
-                persistentOutputStream.flush();
-            }
+                    if (!isActive) continue;
 
-            CompletableFuture<byte[]> responseFuture = responseMap.get(requestKey);
-            if (responseFuture != null) {
-                responseFuture.complete(responseData);
-            }
+                    if (filterMethod.equals("状态码过滤") && String.valueOf(statusCode).equals(rule.trim())) {
+                        shouldFilter = true;
+                        break;
+                    }
+                }
 
-            // 更新请求和响应的映射关系
-            HttpRequestResponse existingRequestResponse = requestResponseMap.get(requestKey);
-            if (existingRequestResponse != null) {
-                // 创建新的 HttpRequestResponse 对象
-                HttpRequestResponse updatedRequestResponse = HttpRequestResponse.httpRequestResponse(
-                    existingRequestResponse.request(),
-                    responseReceived
-                );
-                requestResponseMap.put(requestKey, updatedRequestResponse);
+                if (shouldFilter) {
+                    return;
+                }
+
+                byte[] responseData = responseBytes.getBytes();
+
+                synchronized (persistentOutputStream) {
+                    String message = String.format("%s%d\n%s", RESPONSE_PREFIX, sequentialId, responseReceived.toString());
+                    persistentOutputStream.write(message.getBytes());
+                    persistentOutputStream.write(MESSAGE_SEPARATOR);
+                    persistentOutputStream.flush();
+                }
+
+                orderedMessages.add(String.format("%s%d", RESPONSE_PREFIX, sequentialId));
+
+                CompletableFuture<byte[]> responseFuture = responseMap.get(requestKey);
+                if (responseFuture != null) {
+                    responseFuture.complete(responseData);
+                }
+
+                // 更新请求和响应的映射关系
+                HttpRequestResponse existingRequestResponse = requestResponseMap.get(requestKey);
+                if (existingRequestResponse != null) {
+                    HttpRequestResponse updatedRequestResponse = HttpRequestResponse.httpRequestResponse(
+                        existingRequestResponse.request(),
+                        responseReceived
+                    );
+                    requestResponseMap.put(requestKey, updatedRequestResponse);
+                }
+            } catch (Exception e) {
+                logger.log(Level.SEVERE, "处理响应时出错", e);
             }
-        } catch (Exception e) {
-            logger.log(Level.SEVERE, "处理响应时出错", e);
-        }
-    });
-}
+        });
+    }
 
     private void handleResponses() {
         while (isRunning) {
@@ -507,14 +517,9 @@ public class BurpExtender implements BurpExtension {
                     continue;
                 }
 
-                byte[] keyBytes = new byte[requestKey.length()];
-                int bytesRead = persistentInputStream.read(keyBytes);
-                if (bytesRead != requestKey.length()) {
-                    continue;
-                }
-
                 ByteArrayOutputStream baos = new ByteArrayOutputStream();
                 byte[] buffer = new byte[4096];
+                int bytesRead;
                 while ((bytesRead = persistentInputStream.read(buffer)) != -1) {
                     baos.write(buffer, 0, bytesRead);
                     if (endsWith(baos.toByteArray(), MESSAGE_SEPARATOR)) {
@@ -601,6 +606,11 @@ public class BurpExtender implements BurpExtension {
             hexString.append(hex);
         }
         return hexString.toString();
+    }
+
+    // 新增方法：获取有序的消息列表
+    public List<String> getOrderedMessages() {
+        return new ArrayList<>(orderedMessages);
     }
 
     private class ConfigManager {
