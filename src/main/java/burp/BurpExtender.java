@@ -54,11 +54,12 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
         this.helpers = callbacks.getHelpers();
         callbacks.setExtensionName("HTTP Forwarder");
 
+        configManager = new ConfigManager(callbacks);
+        configManager.loadConfig();
+
         SwingUtilities.invokeLater(this::initializeUI);
 
         executorService = Executors.newFixedThreadPool(10);
-        configManager = new ConfigManager();
-        configManager.loadConfig();
 
         callbacks.registerHttpListener(this);
         callbacks.registerExtensionStateListener(this);
@@ -187,7 +188,21 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
             }
         });
 
+        // 加载保存的规则
+        loadSavedRules();
+
         callbacks.addSuiteTab(this);
+    }
+
+    private void loadSavedRules() {
+        int ruleCount = Integer.parseInt(configManager.getProperty("ruleCount", "0"));
+        for (int i = 0; i < ruleCount; i++) {
+            String method = configManager.getProperty("rule_" + i + "_method", "");
+            String rule = configManager.getProperty("rule_" + i + "_rule", "");
+            boolean status = Boolean.parseBoolean(configManager.getProperty("rule_" + i + "_status", "true"));
+            String note = configManager.getProperty("rule_" + i + "_note", "");
+            ruleTableModel.addRow(new Object[]{i + 1, method, rule, status, note});
+        }
     }
 
     private void testConnection() {
@@ -530,10 +545,28 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
 
     private class ConfigManager {
         private Properties config = new Properties();
+        private File configFile;
+
+        public ConfigManager(IBurpExtenderCallbacks callbacks) {
+            String extensionFilePath = callbacks.getExtensionFilename();
+            File extensionFile = new File(extensionFilePath);
+            configFile = new File(extensionFile.getParentFile(), "http_forwarder_config.properties");
+        }
 
         public void loadConfig() {
-            try (InputStream input = new FileInputStream("config.properties")) {
+            if (!configFile.exists()) {
+                try {
+                    configFile.createNewFile();
+                    logger.info("Created new configuration file: " + configFile.getAbsolutePath());
+                } catch (IOException e) {
+                    logger.log(Level.SEVERE, "无法创建配置文件", e);
+                    return;
+                }
+            }
+
+            try (InputStream input = new FileInputStream(configFile)) {
                 config.load(input);
+                logger.info("Loaded configuration from: " + configFile.getAbsolutePath());
             } catch (IOException ex) {
                 logger.log(Level.WARNING, "加载配置文件时出错", ex);
             }
@@ -542,11 +575,6 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
         public void saveConfig() {
             String serverIp = serverIpField.getText().trim();
             String serverPort = serverPortField.getText().trim();
-
-            if (serverIp.isEmpty() || serverPort.isEmpty()) {
-                JOptionPane.showMessageDialog(mainPanel, "请输入服务器 IP 和端口。", "错误", JOptionPane.ERROR_MESSAGE);
-                return;
-            }
 
             setProperty("forwardingIp", serverIp);
             setProperty("forwardingPort", serverPort);
@@ -559,8 +587,9 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
                 setProperty("rule_" + i + "_note", (String) ruleTableModel.getValueAt(i, 4));
             }
 
-            try (OutputStream output = new FileOutputStream("config.properties")) {
+            try (OutputStream output = new FileOutputStream(configFile)) {
                 config.store(output, null);
+                logger.info("Saved configuration to: " + configFile.getAbsolutePath());
             } catch (IOException io) {
                 logger.log(Level.SEVERE, "保存配置失败", io);
             }
@@ -573,13 +602,6 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
                 try (ObjectOutputStream oos = new ObjectOutputStream(new FileOutputStream(file))) {
                     Properties exportConfig = new Properties();
                     exportConfig.putAll(config);
-                    exportConfig.setProperty("ruleCount", String.valueOf(ruleTableModel.getRowCount()));
-                    for (int i = 0; i < ruleTableModel.getRowCount(); i++) {
-                        exportConfig.setProperty("rule_" + i + "_method", (String) ruleTableModel.getValueAt(i, 1));
-                        exportConfig.setProperty("rule_" + i + "_rule", (String) ruleTableModel.getValueAt(i, 2));
-                        exportConfig.setProperty("rule_" + i + "_status", String.valueOf(ruleTableModel.getValueAt(i, 3)));
-                        exportConfig.setProperty("rule_" + i + "_note", (String) ruleTableModel.getValueAt(i, 4));
-                    }
                     oos.writeObject(exportConfig);
                     JOptionPane.showMessageDialog(mainPanel, "配置已成功导出。", "信息", JOptionPane.INFORMATION_MESSAGE);
                 } catch (IOException e) {
@@ -601,16 +623,10 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
                     serverPortField.setText(getProperty("forwardingPort", ""));
 
                     ruleTableModel.setRowCount(0);
-                    int ruleCount = Integer.parseInt(getProperty("ruleCount", "0"));
-                    for (int i = 0; i < ruleCount; i++) {
-                        String method = getProperty("rule_" + i + "_method", "");
-                        String rule = getProperty("rule_" + i + "_rule", "");
-                        boolean status = Boolean.parseBoolean(getProperty("rule_" + i + "_status", "true"));
-                        String note = getProperty("rule_" + i + "_note", "");
-                        ruleTableModel.addRow(new Object[]{i + 1, method, rule, status, note});
-                    }
+                    loadSavedRules();
 
                     JOptionPane.showMessageDialog(mainPanel, "配置已成功导入。", "信息", JOptionPane.INFORMATION_MESSAGE);
+                    saveConfig();
                 } catch (IOException | ClassNotFoundException e) {
                     JOptionPane.showMessageDialog(mainPanel, "导入配置时出错: " + e.getMessage(), "错误", JOptionPane.ERROR_MESSAGE);
                     logger.log(Level.SEVERE, "导入配置失败", e);
