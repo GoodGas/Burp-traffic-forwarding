@@ -58,7 +58,6 @@ public class BurpExtender implements BurpExtension {
     private static final String REQUEST_PREFIX = "REQUEST:";
     private static final String RESPONSE_PREFIX = "RESPONSE:";
     private final ConcurrentHashMap<String, HttpRequestResponse> requestResponseMap = new ConcurrentHashMap<>();
-    private final AtomicInteger sequentialCounter = new AtomicInteger(0);
     private final List<String> orderedMessages = Collections.synchronizedList(new ArrayList<>());
     private final ConcurrentHashMap<String, Integer> requestKeyToSequentialId = new ConcurrentHashMap<>();
 
@@ -88,7 +87,7 @@ public class BurpExtender implements BurpExtension {
             }
         });
 
-        new Thread(this::handleResponses).start();
+        new Thread(this::handleForwardedMessages).start();
     }
 
     private void initializeUI() {
@@ -354,47 +353,10 @@ public class BurpExtender implements BurpExtension {
                 String method = requestToBeSent.method();
                 String host = requestToBeSent.httpService().host();
 
-                boolean shouldFilter = false;
-                for (int i = 0; i < ruleTableModel.getRowCount(); i++) {
-                    String filterMethod = (String) ruleTableModel.getValueAt(i, 1);
-                    String rule = (String) ruleTableModel.getValueAt(i, 2);
-                    boolean isActive = (Boolean) ruleTableModel.getValueAt(i, 3);
-
-                    if (!isActive) continue;
-
-                    switch (filterMethod) {
-                        case "文件名过滤":
-                            if (url.toLowerCase().endsWith(rule.trim().toLowerCase())) {
-                                shouldFilter = true;
-                            }
-                            break;
-                        case "域名过滤":
-                            if (Pattern.matches(rule, host)) {
-                                shouldFilter = true;
-                            }
-                            break;
-                        case "HTTP方法过滤":
-                            if (method.equalsIgnoreCase(rule.trim())) {
-                                shouldFilter = true;
-                            }
-                            break;
-                        case "IP过滤":
-                            try {
-                                String ip = InetAddress.getByName(host).getHostAddress();
-                                if (ip.equals(rule.trim())) {
-                                    shouldFilter = true;
-                                }
-                            } catch (UnknownHostException e) {
-                                logger.log(Level.WARNING, "无法解析主机名: " + host, e);
-                            }
-                            break;
-                    }
-
-                    if (shouldFilter) break;
-                }
+                boolean shouldFilter = checkFilter(url, method, host);
 
                 String requestKey = generateRequestKey(requestToBeSent);
-                int sequentialId = sequentialCounter.getAndIncrement();
+                int sequentialId = messageCounter.getAndIncrement();
                 requestKeyToSequentialId.put(requestKey, sequentialId);
 
                 if (shouldFilter) {
@@ -416,12 +378,11 @@ public class BurpExtender implements BurpExtension {
 
                 orderedMessages.add(String.format("%s%d", REQUEST_PREFIX, sequentialId));
 
-                // 存储请求和响应的映射关系
                 requestResponseMap.put(requestKey, HttpRequestResponse.httpRequestResponse(requestToBeSent, null));
 
                 try {
                     byte[] responseData = responseFuture.get(30, TimeUnit.SECONDS);
-                    // 响应将在processResponse方法中处理
+                    // Response will be handled in processResponse method
                 } catch (InterruptedException | ExecutionException | TimeoutException e) {
                     logger.log(Level.WARNING, "等待响应时出错", e);
                 } finally {
@@ -453,19 +414,7 @@ public class BurpExtender implements BurpExtension {
                     return;
                 }
 
-                boolean shouldFilter = false;
-                for (int i = 0; i < ruleTableModel.getRowCount(); i++) {
-                    String filterMethod = (String) ruleTableModel.getValueAt(i, 1);
-                    String rule = (String) ruleTableModel.getValueAt(i, 2);
-                    boolean isActive = (Boolean) ruleTableModel.getValueAt(i, 3);
-
-                    if (!isActive) continue;
-
-                    if (filterMethod.equals("状态码过滤") && String.valueOf(statusCode).equals(rule.trim())) {
-                        shouldFilter = true;
-                        break;
-                    }
-                }
+                boolean shouldFilter = checkFilter(statusCode);
 
                 if (shouldFilter) {
                     return;
@@ -487,7 +436,6 @@ public class BurpExtender implements BurpExtension {
                     responseFuture.complete(responseData);
                 }
 
-                // 更新请求和响应的映射关系
                 HttpRequestResponse existingRequestResponse = requestResponseMap.get(requestKey);
                 if (existingRequestResponse != null) {
                     HttpRequestResponse updatedRequestResponse = HttpRequestResponse.httpRequestResponse(
@@ -502,17 +450,17 @@ public class BurpExtender implements BurpExtension {
         });
     }
 
-    private void handleResponses() {
+    private void handleForwardedMessages() {
         while (isRunning) {
             try {
                 String prefix = readLine(persistentInputStream);
                 if (prefix == null) continue;
 
-                String requestKey;
+                int sequentialId;
                 if (prefix.startsWith(REQUEST_PREFIX)) {
-                    requestKey = prefix.substring(REQUEST_PREFIX.length());
+                    sequentialId = Integer.parseInt(prefix.substring(REQUEST_PREFIX.length()));
                 } else if (prefix.startsWith(RESPONSE_PREFIX)) {
-                    requestKey = prefix.substring(RESPONSE_PREFIX.length());
+                    sequentialId = Integer.parseInt(prefix.substring(RESPONSE_PREFIX.length()));
                 } else {
                     continue;
                 }
@@ -529,22 +477,69 @@ public class BurpExtender implements BurpExtension {
 
                 byte[] data = Arrays.copyOf(baos.toByteArray(), baos.size() - MESSAGE_SEPARATOR.length);
 
-                if (prefix.startsWith(RESPONSE_PREFIX)) {
-                    CompletableFuture<byte[]> responseFuture = responseMap.get(requestKey);
-                    if (responseFuture != null) {
-                        responseFuture.complete(data);
-                    } else {
-                        logger.warning("收到未匹配的响应，请求键: " + requestKey);
-                    }
-                } else {
-                    logger.info("收到请求，请求键: " + requestKey);
-                }
+                String message = new String(data);
+                logger.info(String.format("%s%d\n%s", prefix, sequentialId, message));
+
             } catch (IOException e) {
                 if (isRunning) {
-                    logger.log(Level.SEVERE, "处理响应时出错", e);
+                    logger.log(Level.SEVERE, "处理转发消息时出错", e);
                 }
             }
         }
+    }
+
+    private boolean checkFilter(String url, String method, String host) {
+        for (int i = 0; i < ruleTableModel.getRowCount(); i++) {
+            String filterMethod = (String) ruleTableModel.getValueAt(i, 1);
+            String rule = (String) ruleTableModel.getValueAt(i, 2);
+            boolean isActive = (Boolean) ruleTableModel.getValueAt(i, 3);
+
+            if (!isActive) continue;
+
+            switch (filterMethod) {
+                case "文件名过滤":
+                    if (url.toLowerCase().endsWith(rule.trim().toLowerCase())) {
+                        return true;
+                    }
+                    break;
+                case "域名过滤":
+                    if (Pattern.matches(rule, host)) {
+                        return true;
+                    }
+                    break;
+                case "HTTP方法过滤":
+                    if (method.equalsIgnoreCase(rule.trim())) {
+                        return true;
+                    }
+                    break;
+                case "IP过滤":
+                    try {
+                        String ip = InetAddress.getByName(host).getHostAddress();
+                        if (ip.equals(rule.trim())) {
+                            return true;
+                        }
+                    } catch (UnknownHostException e) {
+                        logger.log(Level.WARNING, "无法解析主机名: " + host, e);
+                    }
+                    break;
+            }
+        }
+        return false;
+    }
+
+    private boolean checkFilter(int statusCode) {
+        for (int i = 0; i < ruleTableModel.getRowCount(); i++) {
+            String filterMethod = (String) ruleTableModel.getValueAt(i, 1);
+            String rule = (String) ruleTableModel.getValueAt(i, 2);
+            boolean isActive = (Boolean) ruleTableModel.getValueAt(i, 3);
+
+            if (!isActive) continue;
+
+            if (filterMethod.equals("状态码过滤") && String.valueOf(statusCode).equals(rule.trim())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private String readLine(InputStream is) throws IOException {
