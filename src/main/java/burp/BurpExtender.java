@@ -6,6 +6,8 @@ import burp.api.montoya.core.ByteArray;
 import burp.api.montoya.http.handler.*;
 import burp.api.montoya.http.message.HttpRequestResponse;
 import burp.api.montoya.ui.UserInterface;
+import burp.api.montoya.http.message.requests.HttpRequest;
+import burp.api.montoya.http.message.responses.HttpResponse;
 
 import javax.swing.*;
 import javax.swing.event.TableModelEvent;
