@@ -59,7 +59,8 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
 
         SwingUtilities.invokeLater(this::initializeUI);
 
-        executorService = Executors.newFixedThreadPool(10);
+        executorService = Executors.newCachedThreadPool();
+
 
         callbacks.registerHttpListener(this);
         callbacks.registerExtensionStateListener(this);
