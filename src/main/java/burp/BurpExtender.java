@@ -57,7 +57,6 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
         gbc.insets = new Insets(5, 5, 5, 5);
         gbc.fill = GridBagConstraints.HORIZONTAL;
 
-        // 第一行
         gbc.gridx = 0;
         gbc.gridy = 0;
         mainPanel.add(new JLabel("转发服务器 IP:"), gbc);
@@ -92,7 +91,6 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
         stopButton.setEnabled(false);
         mainPanel.add(stopButton, gbc);
 
-        // 第二行
         gbc.gridx = 0;
         gbc.gridy = 1;
         JButton addRuleButton = new JButton("添加规则");
@@ -116,7 +114,6 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
         importConfigButton = new JButton("导入配置");
         mainPanel.add(importConfigButton, gbc);
 
-        // 规则表格
         gbc.gridx = 0;
         gbc.gridy = 2;
         gbc.gridwidth = 7;
@@ -132,19 +129,17 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
             }
             @Override
             public boolean isCellEditable(int row, int column) {
-                return column == 4; // 只有备注列可编辑
+                return column == 4;
             }
         };
         ruleTable = new JTable(ruleTableModel);
 
-        // 居中对齐单元格内容并使其不可编辑（除备注外）
         DefaultTableCellRenderer centerRenderer = new DefaultTableCellRenderer();
         centerRenderer.setHorizontalAlignment(JLabel.CENTER);
         for (int i = 0; i < ruleTable.getColumnCount() - 1; i++) {
             ruleTable.getColumnModel().getColumn(i).setCellRenderer(centerRenderer);
         }
 
-        // 使表头加粗并居中对齐
         JTableHeader header = ruleTable.getTableHeader();
         header.setDefaultRenderer(new DefaultTableCellRenderer() {
             @Override
@@ -162,7 +157,6 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
         JScrollPane scrollPane = new JScrollPane(ruleTable);
         mainPanel.add(scrollPane, gbc);
 
-        // 添加动作监听器
         testConnectionButton.addActionListener(e -> testConnection());
         startButton.addActionListener(e -> startForwarding());
         stopButton.addActionListener(e -> stopForwarding());
@@ -213,7 +207,6 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
         int selectedRow = ruleTable.getSelectedRow();
         if (selectedRow != -1) {
             ruleTableModel.removeRow(selectedRow);
-            // 重新编号
             for (int i = 0; i < ruleTableModel.getRowCount(); i++) {
                 ruleTableModel.setValueAt(i + 1, i, 0);
             }
@@ -302,7 +295,6 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
         IRequestInfo requestInfo = helpers.analyzeRequest(messageInfo);
         String url = requestInfo.getUrl().toString().toLowerCase();
 
-        // 应用过滤规则
         for (int i = 0; i < ruleTableModel.getRowCount(); i++) {
             String filterMethod = (String) ruleTableModel.getValueAt(i, 1);
             String rule = (String) ruleTableModel.getValueAt(i, 2);
@@ -326,7 +318,6 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
             }
         }
 
-        // 转发请求
         persistentOutputStream.write(messageInfo.getRequest());
         persistentOutputStream.flush();
     }
@@ -334,7 +325,6 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
     private void processResponse(IHttpRequestResponse messageInfo) throws IOException {
         IResponseInfo responseInfo = helpers.analyzeResponse(messageInfo.getResponse());
 
-        // 应用状态码过滤规则
         for (int i = 0; i < ruleTableModel.getRowCount(); i++) {
             String filterMethod = (String) ruleTableModel.getValueAt(i, 1);
             String rule = (String) ruleTableModel.getValueAt(i, 2);
@@ -347,7 +337,6 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
             }
         }
 
-        // 读取转发的响应
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
         byte[] buffer = new byte[4096];
         int bytesRead;
@@ -356,7 +345,6 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
             if (persistentInputStream.available() == 0) break;
         }
 
-        // 设置转发的响应
         messageInfo.setResponse(baos.toByteArray());
     }
 
@@ -443,10 +431,10 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
                     ruleTableModel.setRowCount(0);
                     int ruleCount = Integer.parseInt(getProperty("ruleCount", "0"));
                     for (int i = 0; i < ruleCount; i++) {
-                        String method = getProperty("rule_" + i + "_method");
-                        String rule = getProperty("rule_" + i + "_rule");
-                        boolean status = Boolean.parseBoolean(getProperty("rule_" + i + "_status"));
-                        String note = getProperty("rule_" + i + "_note");
+                        String method = getProperty("rule_" + i + "_method", "");
+                        String rule = getProperty("rule_" + i + "_rule", "");
+                        boolean status = Boolean.parseBoolean(getProperty("rule_" + i + "_status", "true"));
+                        String note = getProperty("rule_" + i + "_note", "");
                         ruleTableModel.addRow(new Object[]{i + 1, method, rule, status, note});
                     }
 
@@ -460,6 +448,10 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
 
         public String getProperty(String key, String defaultValue) {
             return config.getProperty(key, defaultValue);
+        }
+
+        public String getProperty(String key) {
+            return config.getProperty(key);
         }
 
         public void setProperty(String key, String value) {
