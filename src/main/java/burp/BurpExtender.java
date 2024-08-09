@@ -6,7 +6,9 @@ import javax.swing.table.DefaultTableModel;
 import javax.swing.table.JTableHeader;
 import java.awt.*;
 import java.io.*;
+import java.net.InetAddress;
 import java.net.Socket;
+import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
 import java.util.*;
 import java.util.List;
@@ -14,6 +16,7 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.regex.Pattern;
 
 public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtensionStateListener {
     private IBurpExtenderCallbacks callbacks;
@@ -134,7 +137,7 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
             }
             @Override
             public boolean isCellEditable(int row, int column) {
-                return column == 4;
+                return column == 3 || column == 4;
             }
         };
         ruleTable = new JTable(ruleTableModel);
@@ -194,14 +197,32 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
     }
 
     private void addNewRule() {
-        String[] filterMethods = {"黑名单扩展名", "域名过滤", "HTTP方法过滤", "状态码过滤", "IP过滤"};
+        String[] filterMethods = {"文件名过滤", "域名过滤", "HTTP方法过滤", "状态码过滤", "IP过滤"};
         String filterMethod = (String) JOptionPane.showInputDialog(mainPanel, 
             "选择过滤方法:", "添加新规则", JOptionPane.QUESTION_MESSAGE, null, 
             filterMethods, filterMethods[0]);
         
         if (filterMethod != null) {
-            String rule = JOptionPane.showInputDialog(mainPanel, "输入规则:");
-            if (rule != null) {
+            String rule = "";
+            switch (filterMethod) {
+                case "文件名过滤":
+                    rule = JOptionPane.showInputDialog(mainPanel, "输入文件扩展名 (如 .jpg, .png):");
+                    break;
+                case "域名过滤":
+                    rule = JOptionPane.showInputDialog(mainPanel, "输入域名正则表达式:");
+                    break;
+                case "HTTP方法过滤":
+                    String[] methods = {"GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS"};
+                    rule = (String) JOptionPane.showInputDialog(mainPanel, "选择HTTP方法:", "HTTP方法", JOptionPane.QUESTION_MESSAGE, null, methods, methods[0]);
+                    break;
+                case "状态码过滤":
+                    rule = JOptionPane.showInputDialog(mainPanel, "输入状态码 (如 200, 404):");
+                    break;
+                case "IP过滤":
+                    rule = JOptionPane.showInputDialog(mainPanel, "输入IP地址:");
+                    break;
+            }
+            if (rule != null && !rule.isEmpty()) {
                 int newRowIndex = ruleTableModel.getRowCount() + 1;
                 ruleTableModel.addRow(new Object[]{newRowIndex, filterMethod, rule, true, ""});
             }
@@ -301,7 +322,9 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
 
     private void processRequest(IHttpRequestResponse messageInfo) throws IOException {
         IRequestInfo requestInfo = helpers.analyzeRequest(messageInfo);
-        String url = requestInfo.getUrl().toString().toLowerCase();
+        String url = requestInfo.getUrl().toString();
+        String method = requestInfo.getMethod();
+        String host = requestInfo.getUrl().getHost();
 
         boolean shouldFilter = false;
         for (int i = 0; i < ruleTableModel.getRowCount(); i++) {
@@ -312,24 +335,29 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
             if (!isActive) continue;
 
             switch (filterMethod) {
-                case "黑名单扩展名":
-                    if (url.endsWith(rule.trim().toLowerCase())) {
+                case "文件名过滤":
+                    if (url.toLowerCase().endsWith(rule.trim().toLowerCase())) {
                         shouldFilter = true;
                     }
                     break;
                 case "域名过滤":
-                    if (!url.matches(rule)) {
+                    if (Pattern.matches(rule, host)) {
                         shouldFilter = true;
                     }
                     break;
                 case "HTTP方法过滤":
-                    if (!requestInfo.getMethod().equalsIgnoreCase(rule.trim())) {
+                    if (method.equalsIgnoreCase(rule.trim())) {
                         shouldFilter = true;
                     }
                     break;
                 case "IP过滤":
-                    if (!requestInfo.getUrl().getHost().equals(rule.trim())) {
-                        shouldFilter = true;
+                    try {
+                        String ip = InetAddress.getByName(host).getHostAddress();
+                        if (ip.equals(rule.trim())) {
+                            shouldFilter = true;
+                        }
+                    } catch (UnknownHostException e) {
+                        logger.log(Level.WARNING, "无法解析主机名: " + host, e);
                     }
                     break;
             }
@@ -371,6 +399,27 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
 
         if (filteredRequests.remove(messageId)) {
             // 如果对应的请求被过滤了,我们也不转发这个响应
+            return;
+        }
+
+        IResponseInfo responseInfo = helpers.analyzeResponse(messageInfo.getResponse());
+        short statusCode = responseInfo.getStatusCode();
+
+        boolean shouldFilter = false;
+        for (int i = 0; i < ruleTableModel.getRowCount(); i++) {
+            String filterMethod = (String) ruleTableModel.getValueAt(i, 1);
+            String rule = (String) ruleTableModel.getValueAt(i, 2);
+            boolean isActive = (Boolean) ruleTableModel.getValueAt(i, 3);
+
+            if (!isActive) continue;
+
+            if (filterMethod.equals("状态码过滤") && String.valueOf(statusCode).equals(rule.trim())) {
+                shouldFilter = true;
+                break;
+            }
+        }
+
+        if (shouldFilter) {
             return;
         }
 
