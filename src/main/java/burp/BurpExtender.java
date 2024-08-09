@@ -1,12 +1,5 @@
 package burp;
 
-import burp.api.montoya.MontoyaApi;
-import burp.api.montoya.core.ByteArray;
-import burp.api.montoya.http.message.HttpRequestResponse;
-import burp.api.montoya.proxy.Proxy;
-import burp.api.montoya.proxy.ProxyHttpRequestResponse;
-import burp.api.montoya.proxy.ProxyHistoryFilter;
-
 import javax.swing.*;
 import javax.swing.event.TableModelEvent;
 import javax.swing.event.TableModelListener;
@@ -27,10 +20,9 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.regex.Pattern;
 
-public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtensionStateListener, ProxyHistoryFilter {
+public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtensionStateListener {
     private IBurpExtenderCallbacks callbacks;
     private IExtensionHelpers helpers;
-    private MontoyaApi api;
     private JPanel mainPanel;
     private JTextField serverIpField;
     private JTextField serverPortField;
@@ -55,13 +47,11 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
     private static final byte[] MESSAGE_SEPARATOR = "\r\n====================================================\r\n".getBytes();
     private static final String REQUEST_PREFIX = "REQUEST:";
     private static final String RESPONSE_PREFIX = "RESPONSE:";
-    private Proxy burpProxy;
 
     @Override
     public void registerExtenderCallbacks(IBurpExtenderCallbacks callbacks) {
         this.callbacks = callbacks;
         this.helpers = callbacks.getHelpers();
-        this.api = callbacks.createMontoyaApi();
         callbacks.setExtensionName("HTTP Forwarder");
 
         configManager = new ConfigManager(callbacks);
@@ -70,8 +60,6 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
         SwingUtilities.invokeLater(this::initializeUI);
 
         executorService = Executors.newCachedThreadPool();
-
-        burpProxy = api.proxy();
 
         callbacks.registerHttpListener(this);
         callbacks.registerExtensionStateListener(this);
@@ -436,14 +424,7 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
     }
 
     private void processResponse(IHttpRequestResponse messageInfo) throws IOException {
-        List<ProxyHttpRequestResponse> matchingRequests = burpProxy.history(this);
-        if (matchingRequests.isEmpty()) {
-            logger.warning("未找到匹配的请求");
-            return;
-        }
-
-        ProxyHttpRequestResponse matchingRequest = matchingRequests.get(0);
-        int messageId = matchingRequest.messageId();
+        int messageId = messageCounter.get() - 1; // 获取最后一个请求的ID
 
         if (filteredRequests.remove(messageId)) {
             return;
@@ -565,54 +546,6 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
     public void extensionUnloaded() {
         executorService.shutdown();
         stopForwarding();
-    }
-
-    @Override
-    public boolean matches(ProxyHttpRequestResponse requestResponse) {
-        HttpRequestResponse httpRequestResponse = requestResponse.finalRequestResponse();
-        ByteArray requestBytes = httpRequestResponse.request().toByteArray();
-        byte[] request = requestBytes.getBytes();
-        IRequestInfo requestInfo = helpers.analyzeRequest(request);
-        String url = requestInfo.getUrl().toString();
-        String method = requestInfo.getMethod();
-        String host = requestInfo.getUrl().getHost();
-
-        for (int i = 0; i < ruleTableModel.getRowCount(); i++) {
-            String filterMethod = (String) ruleTableModel.getValueAt(i, 1);
-            String rule = (String) ruleTableModel.getValueAt(i, 2);
-            boolean isActive = (Boolean) ruleTableModel.getValueAt(i, 3);
-
-            if (!isActive) continue;
-
-            switch (filterMethod) {
-                case "文件名过滤":
-                    if (url.toLowerCase().endsWith(rule.trim().toLowerCase())) {
-                        return true;
-                    }
-                    break;
-                case "域名过滤":
-                    if (Pattern.matches(rule, host)) {
-                        return true;
-                    }
-                    break;
-                case "HTTP方法过滤":
-                    if (method.equalsIgnoreCase(rule.trim())) {
-                        return true;
-                    }
-                    break;
-                case "IP过滤":
-                    try {
-                        String ip = InetAddress.getByName(host).getHostAddress();
-                        if (ip.equals(rule.trim())) {
-                            return true;
-                        }
-                    } catch (UnknownHostException e) {
-                        logger.log(Level.WARNING, "无法解析主机名: " + host, e);
-                    }
-                    break;
-            }
-        }
-        return false;
     }
 
     private class ConfigManager {
