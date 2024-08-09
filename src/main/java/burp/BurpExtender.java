@@ -34,6 +34,8 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
     private OutputStream persistentOutputStream;
     private InputStream persistentInputStream;
     private static final Logger logger = Logger.getLogger(BurpExtender.class.getName());
+    private final ConcurrentHashMap<Integer, CompletableFuture<byte[]>> responseMap = new ConcurrentHashMap<>();
+    private final AtomicInteger messageCounter = new AtomicInteger(0);
 
     @Override
     public void registerExtenderCallbacks(IBurpExtenderCallbacks callbacks) {
@@ -239,6 +241,9 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
                     stopButton.setEnabled(true);
                     JOptionPane.showMessageDialog(mainPanel, "转发已启动。", "信息", JOptionPane.INFORMATION_MESSAGE);
                 });
+
+                // 启动响应处理线程
+                new Thread(this::handleResponses).start();
             } catch (IOException e) {
                 SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(mainPanel, "启动转发时出错: " + e.getMessage(), "错误", JOptionPane.ERROR_MESSAGE));
                 logger.log(Level.SEVERE, "启动转发失败", e);
@@ -318,34 +323,61 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
             }
         }
 
-        persistentOutputStream.write(messageInfo.getRequest());
-        persistentOutputStream.flush();
+        int messageId = messageCounter.getAndIncrement();
+        CompletableFuture<byte[]> responseFuture = new CompletableFuture<>();
+        responseMap.put(messageId, responseFuture);
+
+        byte[] requestData = messageInfo.getRequest();
+        byte[] idBytes = ByteBuffer.allocate(4).putInt(messageId).array();
+
+        synchronized (persistentOutputStream) {
+            persistentOutputStream.write(idBytes);
+            persistentOutputStream.write(requestData);
+            persistentOutputStream.flush();
+        }
+
+        try {
+            byte[] responseData = responseFuture.get(30, TimeUnit.SECONDS);
+            messageInfo.setResponse(responseData);
+        } catch (InterruptedException | ExecutionException | TimeoutException e) {
+            logger.log(Level.WARNING, "等待响应时出错", e);
+        } finally {
+            responseMap.remove(messageId);
+        }
     }
 
-    private void processResponse(IHttpRequestResponse messageInfo) throws IOException {
-        IResponseInfo responseInfo = helpers.analyzeResponse(messageInfo.getResponse());
+    private void processResponse(IHttpRequestResponse messageInfo) {
+        // 这个方法不再需要，因为响应将在handleResponses方法中处理
+    }
 
-        for (int i = 0; i < ruleTableModel.getRowCount(); i++) {
-            String filterMethod = (String) ruleTableModel.getValueAt(i, 1);
-            String rule = (String) ruleTableModel.getValueAt(i, 2);
-            boolean isActive = (Boolean) ruleTableModel.getValueAt(i, 3);
+    private void handleResponses() {
+        while (isRunning) {
+            try {
+                byte[] idBytes = new byte[4];
+                int bytesRead = persistentInputStream.read(idBytes);
+                if (bytesRead != 4) {
+                    continue;
+                }
+                int messageId = ByteBuffer.wrap(idBytes).getInt();
 
-            if (!isActive) continue;
+                ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                byte[] buffer = new byte[4096];
+                while ((bytesRead = persistentInputStream.read(buffer)) != -1) {
+                    baos.write(buffer, 0, bytesRead);
+                    if (persistentInputStream.available() == 0) break;
+                }
 
-            if ("状态码过滤".equals(filterMethod)) {
-                if (!String.valueOf(responseInfo.getStatusCode()).equals(rule.trim())) return;
+                byte[] responseData = baos.toByteArray();
+                CompletableFuture<byte[]> responseFuture = responseMap.get(messageId);
+                if (responseFuture != null) {
+                    responseFuture.complete(responseData);
+                }
+            } catch (IOException e) {
+                if (isRunning) {
+                    logger.log(Level.SEVERE, "处理响应时出错", e);
+                }
             }
         }
-
-        ByteArrayOutputStream baos = new ByteArrayOutputStream();
-        byte[] buffer = new byte[4096];
-        int bytesRead;
-        while ((bytesRead = persistentInputStream.read(buffer)) != -1) {
-            baos.write(buffer, 0, bytesRead);
-            if (persistentInputStream.available() == 0) break;
-        }
-
-        messageInfo.setResponse(baos.toByteArray());
     }
 
     @Override
