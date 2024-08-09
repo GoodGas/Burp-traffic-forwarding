@@ -45,6 +45,8 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
     private final AtomicInteger messageCounter = new AtomicInteger(0);
     private final Set<Integer> filteredRequests = Collections.newSetFromMap(new ConcurrentHashMap<>());
     private static final byte[] MESSAGE_SEPARATOR = "\r\n====================================================\r\n".getBytes();
+    private static final String REQUEST_PREFIX = "REQUEST:";
+    private static final String RESPONSE_PREFIX = "RESPONSE:";
 
     @Override
     public void registerExtenderCallbacks(IBurpExtenderCallbacks callbacks) {
@@ -392,6 +394,7 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
         byte[] idBytes = ByteBuffer.allocate(4).putInt(messageId).array();
 
         synchronized (persistentOutputStream) {
+            persistentOutputStream.write((REQUEST_PREFIX + messageId + "\n").getBytes());
             persistentOutputStream.write(idBytes);
             persistentOutputStream.write(requestData);
             persistentOutputStream.write(MESSAGE_SEPARATOR);
@@ -441,6 +444,7 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
         byte[] idBytes = ByteBuffer.allocate(4).putInt(messageId).array();
 
         synchronized (persistentOutputStream) {
+            persistentOutputStream.write((RESPONSE_PREFIX + messageId + "\n").getBytes());
             persistentOutputStream.write(idBytes);
             persistentOutputStream.write(responseData);
             persistentOutputStream.write(MESSAGE_SEPARATOR);
@@ -451,12 +455,23 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
     private void handleResponses() {
         while (isRunning) {
             try {
+                String prefix = readLine(persistentInputStream);
+                if (prefix == null) continue;
+
+                int messageId;
+                if (prefix.startsWith(REQUEST_PREFIX)) {
+                    messageId = Integer.parseInt(prefix.substring(REQUEST_PREFIX.length()));
+                } else if (prefix.startsWith(RESPONSE_PREFIX)) {
+                    messageId = Integer.parseInt(prefix.substring(RESPONSE_PREFIX.length()));
+                } else {
+                    continue;
+                }
+
                 byte[] idBytes = new byte[4];
                 int bytesRead = persistentInputStream.read(idBytes);
                 if (bytesRead != 4) {
                     continue;
                 }
-                int messageId = ByteBuffer.wrap(idBytes).getInt();
 
                 ByteArrayOutputStream baos = new ByteArrayOutputStream();
                 byte[] buffer = new byte[4096];
@@ -467,10 +482,13 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
                     }
                 }
 
-                byte[] responseData = Arrays.copyOf(baos.toByteArray(), baos.size() - MESSAGE_SEPARATOR.length);
-                CompletableFuture<byte[]> responseFuture = responseMap.get(messageId);
-                if (responseFuture != null) {
-                    responseFuture.complete(responseData);
+                byte[] data = Arrays.copyOf(baos.toByteArray(), baos.size() - MESSAGE_SEPARATOR.length);
+
+                if (prefix.startsWith(RESPONSE_PREFIX)) {
+                    CompletableFuture<byte[]> responseFuture = responseMap.get(messageId);
+                    if (responseFuture != null) {
+                        responseFuture.complete(data);
+                    }
                 }
             } catch (IOException e) {
                 if (isRunning) {
@@ -478,6 +496,18 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
                 }
             }
         }
+    }
+
+    private String readLine(InputStream is) throws IOException {
+        StringBuilder sb = new StringBuilder();
+        int c;
+        while ((c = is.read()) != -1) {
+            if (c == '\n') {
+                break;
+            }
+            sb.append((char) c);
+        }
+        return sb.length() > 0 ? sb.toString() : null;
     }
 
     private boolean endsWith(byte[] array, byte[] suffix) {
