@@ -1,7 +1,9 @@
 package burp;
 
 import javax.swing.*;
+import javax.swing.table.DefaultTableCellRenderer;
 import javax.swing.table.DefaultTableModel;
+import javax.swing.table.JTableHeader;
 import java.awt.*;
 import java.io.*;
 import java.net.Socket;
@@ -27,6 +29,9 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
     private Properties config;
     private boolean isRunning = false;
     private ExecutorService executorService;
+    private Socket persistentSocket;
+    private OutputStream persistentOutputStream;
+    private InputStream persistentInputStream;
 
     @Override
     public void registerExtenderCallbacks(IBurpExtenderCallbacks callbacks) {
@@ -115,7 +120,7 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
         gbc.gridwidth = 7;
         gbc.weighty = 1.0;
         gbc.fill = GridBagConstraints.BOTH;
-      
+        
         String[] columnNames = {"序号", "过滤方法", "过滤规则", "规则状态", "规则备注"};
         ruleTableModel = new DefaultTableModel(columnNames, 0) {
             @Override
@@ -125,10 +130,33 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
             }
             @Override
             public boolean isCellEditable(int row, int column) {
-                return column != 0; // 序号列不可编辑
+                return column == 4; // Only the notes column is editable
             }
         };
         ruleTable = new JTable(ruleTableModel);
+
+        // Center-align cell contents and make them non-editable (except notes)
+        DefaultTableCellRenderer centerRenderer = new DefaultTableCellRenderer();
+        centerRenderer.setHorizontalAlignment(JLabel.CENTER);
+        for (int i = 0; i < ruleTable.getColumnCount() - 1; i++) {
+            ruleTable.getColumnModel().getColumn(i).setCellRenderer(centerRenderer);
+        }
+
+        // Make headers bold and center-aligned
+        JTableHeader header = ruleTable.getTableHeader();
+        header.setDefaultRenderer(new DefaultTableCellRenderer() {
+            @Override
+            public Component getTableCellRendererComponent(JTable table, Object value,
+                                                           boolean isSelected, boolean hasFocus,
+                                                           int row, int column) {
+                JLabel label = (JLabel) super.getTableCellRendererComponent(table, value,
+                        isSelected, hasFocus, row, column);
+                label.setHorizontalAlignment(JLabel.CENTER);
+                label.setFont(label.getFont().deriveFont(Font.BOLD));
+                return label;
+            }
+        });
+
         JScrollPane scrollPane = new JScrollPane(ruleTable);
         mainPanel.add(scrollPane, gbc);
 
@@ -168,7 +196,7 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
         String filterMethod = (String) JOptionPane.showInputDialog(mainPanel, 
             "选择过滤方法:", "添加新规则", JOptionPane.QUESTION_MESSAGE, null, 
             filterMethods, filterMethods[0]);
-      
+        
         if (filterMethod != null) {
             String rule = JOptionPane.showInputDialog(mainPanel, "输入规则:");
             if (rule != null) {
@@ -231,16 +259,35 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
         config.setProperty("forwardingIp", serverIp);
         config.setProperty("forwardingPort", serverPort);
 
-        isRunning = true;
-        startButton.setEnabled(false);
-        stopButton.setEnabled(true);
-        JOptionPane.showMessageDialog(mainPanel, "转发已启动。", "信息", JOptionPane.INFORMATION_MESSAGE);
+        try {
+            persistentSocket = new Socket(serverIp, Integer.parseInt(serverPort));
+            persistentOutputStream = persistentSocket.getOutputStream();
+            persistentInputStream = persistentSocket.getInputStream();
+            
+            isRunning = true;
+            startButton.setEnabled(false);
+            stopButton.setEnabled(true);
+            JOptionPane.showMessageDialog(mainPanel, "转发已启动。", "信息", JOptionPane.INFORMATION_MESSAGE);
+        } catch (IOException e) {
+            JOptionPane.showMessageDialog(mainPanel, "启动转发时出错: " + e.getMessage(), "错误", JOptionPane.ERROR_MESSAGE);
+        }
     }
 
     private void stopForwarding() {
         isRunning = false;
         startButton.setEnabled(true);
         stopButton.setEnabled(false);
+        
+        try {
+            if (persistentSocket != null && !persistentSocket.isClosed()) {
+                persistentSocket.close();
+            }
+            persistentOutputStream = null;
+            persistentInputStream = null;
+        } catch (IOException e) {
+            callbacks.printError("关闭连接时出错: " + e.getMessage());
+        }
+        
         JOptionPane.showMessageDialog(mainPanel, "转发已停止。", "信息", JOptionPane.INFORMATION_MESSAGE);
     }
 
@@ -314,74 +361,108 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
 
     @Override
     public void processHttpMessage(int toolFlag, boolean messageIsRequest, IHttpRequestResponse messageInfo) {
-        if (!isRunning) return;
+        if (!isRunning || persistentSocket == null || persistentSocket.isClosed()) return;
 
         executorService.submit(() -> {
             try {
-                IRequestInfo requestInfo = helpers.analyzeRequest(messageInfo);
-                IResponseInfo responseInfo = messageIsRequest ? null : helpers.analyzeResponse(messageInfo.getResponse());
-                String url = requestInfo.getUrl().toString().toLowerCase();
-              
-                // 应用过滤规则
-                for (int i = 0; i < ruleTableModel.getRowCount(); i++) {
-                    String filterMethod = (String) ruleTableModel.getValueAt(i, 1);
-                    String rule = (String) ruleTableModel.getValueAt(i, 2);
-                    boolean isActive = (Boolean) ruleTableModel.getValueAt(i, 3);
-                  
-                    if (!isActive) continue;
-                  
-                    switch (filterMethod) {
-                        case "黑名单扩展名":
-                            if (url.endsWith(rule.trim().toLowerCase())) return;
-                            break;
-                        case "域名过滤":
-                            if (!url.matches(rule)) return;
-                            break;
-                        case "HTTP方法过滤":
-                            if (!requestInfo.getMethod().equalsIgnoreCase(rule.trim())) return;
-                            break;
-                        case "状态码过滤":
-                            if (!messageIsRequest && !String.valueOf(responseInfo.getStatusCode()).equals(rule.trim())) return;
-                            break;
-                        case "IP过滤":
-                            if (!requestInfo.getUrl().getHost().equals(rule.trim())) return;
-                            break;
-                    }
+                if (messageIsRequest) {
+                    processRequest(messageInfo);
+                } else {
+                    processResponse(messageInfo);
                 }
-
-                // 转发请求
-                String serverIp = config.getProperty("forwardingIp");
-                int serverPort = Integer.parseInt(config.getProperty("forwardingPort"));
-                forwardRequest(messageInfo, serverIp, serverPort);
-
             } catch (Exception e) {
                 callbacks.printError("处理 HTTP 消息时出错: " + e.getMessage());
             }
         });
     }
 
-    private void forwardRequest(IHttpRequestResponse messageInfo, String serverIp, int serverPort) {
-        try (Socket socket = new Socket(serverIp, serverPort)) {
-            OutputStream os = socket.getOutputStream();
-            os.write(messageInfo.getRequest());
-            os.flush();
+    private void processRequest(IHttpRequestResponse messageInfo) throws IOException {
+        IRequestInfo requestInfo = helpers.analyzeRequest(messageInfo);
+        String url = requestInfo.getUrl().toString().toLowerCase();
 
-            InputStream is = socket.getInputStream();
+        // 应用过滤规则
+        for (int i = 0; i < ruleTableModel.getRowCount(); i++) {
+            String filterMethod = (String) ruleTableModel.getValueAt(i, 1);
+            String rule = (String) ruleTableModel.getValueAt(i, 2);
+            boolean isActive = (Boolean) ruleTableModel.getValueAt(i, 3);
+
+            if (!isActive) continue;
+
+            switch (filterMethod) {
+                case "黑名单扩展名":
+                    if (url.endsWith(rule.trim().toLowerCase())) return;
+                    break;
+                case "域名过滤":
+                    if (!url.matches(rule)) return;
+                    break;
+                case "HTTP方法过滤":
+                    if (!requestInfo.getMethod().equalsIgnoreCase(rule.trim())) return;
+                    break;
+                case "IP过滤":
+                    if (!requestInfo.getUrl().getHost().equals(rule.trim())) return;
+                    break;
+            }
+        }
+
+        // 转发请求
+        persistentOutputStream.write(messageInfo.getRequest());
+        persistentOutputStream.flush();
+    }
+
+    private void processResponse(IHttpRequestResponse messageInfo) throws IOException {
+        IResponseInfo responseInfo = helpers.analyzeResponse(messageInfo.getResponse());
+
+        // 应用状态码过滤规则
+        for (int i = 0; i < ruleTableModel.getRowCount(); i++) {
+            String filterMethod = (String) ruleTableModel.getValueAt(i, 1);
+            String rule = (String) ruleTableModel.getValueAt(i, 2);
+            boolean isActive = (Boolean) ruleTableModel.getValueAt(i, 3);
+
+            if (!isActive) continue;
+
+            if ("状态码过滤".equals(filterMethod)) {
+                if (!String.valueOf(responseInfo.getStatusCode()).equals(rule.trim())) return;
+            }
+        }
+
+        // 读取转发的响应
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        byte[] buffer = new byte[4096];
+        int bytesRead;
+        while ((bytesRead = persistentInputStream.read(buffer)) != -1) {
+            baos.write(buffer, 0, bytesRead);
+            if (persistentInputStream.available() == 0) break;
+        }
+
+        // 设置转发的响应
+        messageInfo.setResponse(baos.toByteArray());
+    }
+
+    private void forwardRequest(IHttpRequestResponse messageInfo) {
+        try {
+            persistentOutputStream.write(messageInfo.getRequest());
+            persistentOutputStream.flush();
+
             ByteArrayOutputStream baos = new ByteArrayOutputStream();
             byte[] buffer = new byte[4096];
             int bytesRead;
-            while ((bytesRead = is.read(buffer)) != -1) {
+            while ((bytesRead = persistentInputStream.read(buffer)) != -1) {
                 baos.write(buffer, 0, bytesRead);
+                if (persistentInputStream.available() == 0) break;
             }
 
             messageInfo.setResponse(baos.toByteArray());
         } catch (IOException e) {
             callbacks.printError("转发请求时出错: " + e.getMessage());
+            // 如果出现错误，尝试重新建立连接
+            stopForwarding();
+            startForwarding();
         }
     }
 
     @Override
     public void extensionUnloaded() {
         executorService.shutdown();
+        stopForwarding();
     }
 }
