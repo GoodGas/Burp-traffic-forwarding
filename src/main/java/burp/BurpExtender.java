@@ -343,96 +343,70 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
 
         executorService.submit(() -> {
             try {
-                if (messageIsRequest) {
-                    processRequest(messageInfo);
-                } else {
-                    processResponse(messageInfo);
+                IRequestInfo requestInfo = helpers.analyzeRequest(messageInfo);
+                IResponseInfo responseInfo = messageIsRequest ? null : helpers.analyzeResponse(messageInfo.getResponse());
+                String url = requestInfo.getUrl().toString().toLowerCase();
+                
+                // 应用过滤规则
+                for (int i = 0; i < ruleTableModel.getRowCount(); i++) {
+                    String filterMethod = (String) ruleTableModel.getValueAt(i, 1);
+                    String rule = (String) ruleTableModel.getValueAt(i, 2);
+                    boolean isActive = (Boolean) ruleTableModel.getValueAt(i, 3);
+                    
+                    if (!isActive) continue;
+                    
+                    switch (filterMethod) {
+                        case "黑名单扩展名":
+                            if (url.endsWith(rule.trim().toLowerCase())) return;
+                            break;
+                        case "域名过滤":
+                            if (!url.matches(rule)) return;
+                            break;
+                        case "HTTP方法过滤":
+                            if (!requestInfo.getMethod().equalsIgnoreCase(rule.trim())) return;
+                            break;
+                        case "状态码过滤":
+                            if (!messageIsRequest && !String.valueOf(responseInfo.getStatusCode()).equals(rule.trim())) return;
+                            break;
+                        case "IP过滤":
+                            if (!requestInfo.getUrl().getHost().equals(rule.trim())) return;
+                            break;
+                    }
                 }
+
+                // 转发请求
+                String serverIp = config.getProperty("forwardingIp");
+                int serverPort = Integer.parseInt(config.getProperty("forwardingPort"));
+                forwardRequest(messageInfo, serverIp, serverPort);
+
             } catch (Exception e) {
                 callbacks.printError("处理 HTTP 消息时出错: " + e.getMessage());
             }
         });
     }
 
-    private void processRequest(IHttpRequestResponse messageInfo) throws IOException {
-        IRequestInfo requestInfo = helpers.analyzeRequest(messageInfo);
-        String url = requestInfo.getUrl().toString().toLowerCase();
+    private void forwardRequest(IHttpRequestResponse messageInfo, String serverIp, int serverPort) {
+        try (Socket socket = new Socket(serverIp, serverPort)) {
+            OutputStream os = socket.getOutputStream();
+            os.write(messageInfo.getRequest());
+            os.flush();
 
-        if (shouldForward(requestInfo, url, true)) {
-            forwardRequest(messageInfo);
-        }
-    }
-
-    private void processResponse(IHttpRequestResponse messageInfo) throws IOException {
-        IResponseInfo responseInfo = helpers.analyzeResponse(messageInfo.getResponse());
-        IRequestInfo requestInfo = helpers.analyzeRequest(messageInfo);
-        String url = requestInfo.getUrl().toString().toLowerCase();
-
-        if (shouldForward(requestInfo, url, false)) {
-            forwardResponse(messageInfo);
-        }
-    }
-
-    private boolean shouldForward(IRequestInfo requestInfo, String url, boolean isRequest) {
-        for (int i = 0; i < ruleTableModel.getRowCount(); i++) {
-            String filterMethod = (String) ruleTableModel.getValueAt(i, 1);
-            String rule = (String) ruleTableModel.getValueAt(i, 2);
-            boolean isActive = (Boolean) ruleTableModel.getValueAt(i, 3);
-
-            if (!isActive) continue;
-
-            switch (filterMethod) {
-                case "黑名单扩展名":
-                    if (url.endsWith(rule.trim().toLowerCase())) return false;
-                    break;
-                case "域名过滤":
-                    if (!url.matches(rule)) return false;
-                    break;
-                case "HTTP方法过滤":
-                    if (!requestInfo.getMethod().equalsIgnoreCase(rule.trim())) return false;
-                    break;
-                case "状态码过滤":
-                    if (!isRequest) {
-                        IResponseInfo responseInfo = helpers.analyzeResponse(messageInfo.getResponse());
-                        if (!String.valueOf(responseInfo.getStatusCode()).equals(rule.trim())) return false;
-                    }
-                    break;
-                case "IP过滤":
-                    if (!requestInfo.getUrl().getHost().equals(rule.trim())) return false;
-                    break;
+            InputStream is = socket.getInputStream();
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            byte[] buffer = new byte[4096];
+            int bytesRead;
+            while ((bytesRead = is.read(buffer)) != -1) {
+                baos.write(buffer, 0, bytesRead);
             }
+
+            messageInfo.setResponse(baos.toByteArray());
+        } catch (IOException e) {
+            callbacks.printError("转发请求时出错: " + e.getMessage());
         }
-        return true;
-    }
-
-    private void forwardRequest(IHttpRequestResponse messageInfo) throws IOException {
-        byte[] request = messageInfo.getRequest();
-        forwardingOutputStream.write(request);
-        forwardingOutputStream.flush();
-    }
-
-    private void forwardResponse(IHttpRequestResponse messageInfo) throws IOException {
-        ByteArrayOutputStream baos = new ByteArrayOutputStream();
-        byte[] buffer = new byte[4096];
-        int bytesRead;
-        while ((bytesRead = forwardingInputStream.read(buffer)) != -1) {
-            baos.write(buffer, 0, bytesRead);
-            if (forwardingInputStream.available() == 0) break;
-        }
-
-        byte[] response = baos.toByteArray();
-        messageInfo.setResponse(response);
     }
 
     @Override
     public void extensionUnloaded() {
         executorService.shutdown();
-        try {
-            if (forwardingSocket != null && !forwardingSocket.isClosed()) {
-                forwardingSocket.close();
-            }
-        } catch (IOException e) {
-            callbacks.printError("卸载扩展时关闭转发连接出错: " + e.getMessage());
-        }
     }
 }
