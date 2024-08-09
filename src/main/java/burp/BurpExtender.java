@@ -1,5 +1,12 @@
 package burp;
 
+import burp.api.montoya.MontoyaApi;
+import burp.api.montoya.core.ByteArray;
+import burp.api.montoya.http.message.HttpRequestResponse;
+import burp.api.montoya.proxy.Proxy;
+import burp.api.montoya.proxy.ProxyHttpRequestResponse;
+import burp.api.montoya.proxy.ProxyHistoryFilter;
+
 import javax.swing.*;
 import javax.swing.event.TableModelEvent;
 import javax.swing.event.TableModelListener;
@@ -20,9 +27,10 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.regex.Pattern;
 
-public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtensionStateListener {
+public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtensionStateListener, ProxyHistoryFilter {
     private IBurpExtenderCallbacks callbacks;
     private IExtensionHelpers helpers;
+    private MontoyaApi api;
     private JPanel mainPanel;
     private JTextField serverIpField;
     private JTextField serverPortField;
@@ -47,11 +55,13 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
     private static final byte[] MESSAGE_SEPARATOR = "\r\n====================================================\r\n".getBytes();
     private static final String REQUEST_PREFIX = "REQUEST:";
     private static final String RESPONSE_PREFIX = "RESPONSE:";
+    private Proxy burpProxy;
 
     @Override
     public void registerExtenderCallbacks(IBurpExtenderCallbacks callbacks) {
         this.callbacks = callbacks;
         this.helpers = callbacks.getHelpers();
+        this.api = callbacks.createMontoyaApi();
         callbacks.setExtensionName("HTTP Forwarder");
 
         configManager = new ConfigManager(callbacks);
@@ -60,6 +70,8 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
         SwingUtilities.invokeLater(this::initializeUI);
 
         executorService = Executors.newCachedThreadPool();
+
+        burpProxy = api.proxy();
 
         callbacks.registerHttpListener(this);
         callbacks.registerExtensionStateListener(this);
@@ -180,7 +192,6 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
         exportConfigButton.addActionListener(e -> configManager.exportConfig());
         importConfigButton.addActionListener(e -> configManager.importConfig());
 
-        // 添加表格模型监听器，实现实时保存
         ruleTableModel.addTableModelListener(new TableModelListener() {
             @Override
             public void tableChanged(TableModelEvent e) {
@@ -188,7 +199,6 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
             }
         });
 
-        // 加载保存的规则
         loadSavedRules();
 
         callbacks.addSuiteTab(this);
@@ -253,7 +263,7 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
             if (rule != null && !rule.isEmpty()) {
                 int newRowIndex = ruleTableModel.getRowCount() + 1;
                 ruleTableModel.addRow(new Object[]{newRowIndex, filterMethod, rule, true, ""});
-                configManager.saveConfig(); // 添加新规则后保存配置
+                configManager.saveConfig();
             }
         }
     }
@@ -265,7 +275,7 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
             for (int i = 0; i < ruleTableModel.getRowCount(); i++) {
                 ruleTableModel.setValueAt(i + 1, i, 0);
             }
-            configManager.saveConfig(); // 删除规则后保存配置
+            configManager.saveConfig();
         } else {
             JOptionPane.showMessageDialog(mainPanel, "请选择要删除的规则。", "错误", JOptionPane.ERROR_MESSAGE);
         }
@@ -296,7 +306,6 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
                     JOptionPane.showMessageDialog(mainPanel, "转发已启动。", "信息", JOptionPane.INFORMATION_MESSAGE);
                 });
 
-                // 启动响应处理线程
                 new Thread(this::handleResponses).start();
             } catch (IOException e) {
                 SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(mainPanel, "启动转发时出错: " + e.getMessage(), "错误", JOptionPane.ERROR_MESSAGE));
@@ -427,7 +436,55 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
     }
 
     private void processResponse(IHttpRequestResponse messageInfo) throws IOException {
-        // 不在这里处理响应，而是在handleResponses方法中处理
+        List<ProxyHttpRequestResponse> matchingRequests = burpProxy.history(this);
+        if (matchingRequests.isEmpty()) {
+            logger.warning("未找到匹配的请求");
+            return;
+        }
+
+        ProxyHttpRequestResponse matchingRequest = matchingRequests.get(0);
+        int messageId = matchingRequest.messageId();
+
+        if (filteredRequests.remove(messageId)) {
+            return;
+        }
+
+        IResponseInfo responseInfo = helpers.analyzeResponse(messageInfo.getResponse());
+        short statusCode = responseInfo.getStatusCode();
+
+        boolean shouldFilter = false;
+        for (int i = 0; i < ruleTableModel.getRowCount(); i++) {
+            String filterMethod = (String) ruleTableModel.getValueAt(i, 1);
+            String rule = (String) ruleTableModel.getValueAt(i, 2);
+            boolean isActive = (Boolean) ruleTableModel.getValueAt(i, 3);
+
+            if (!isActive) continue;
+
+            if (filterMethod.equals("状态码过滤") && String.valueOf(statusCode).equals(rule.trim())) {
+                shouldFilter = true;
+                break;
+            }
+        }
+
+        if (shouldFilter) {
+            return;
+        }
+
+        byte[] responseData = messageInfo.getResponse();
+        byte[] idBytes = ByteBuffer.allocate(4).putInt(messageId).array();
+
+        synchronized (persistentOutputStream) {
+            persistentOutputStream.write((RESPONSE_PREFIX + messageId + "\n").getBytes());
+            persistentOutputStream.write(idBytes);
+            persistentOutputStream.write(responseData);
+            persistentOutputStream.write(MESSAGE_SEPARATOR);
+            persistentOutputStream.flush();
+        }
+
+        CompletableFuture<byte[]> responseFuture = responseMap.get(messageId);
+        if (responseFuture != null) {
+            responseFuture.complete(responseData);
+        }
     }
 
     private void handleResponses() {
@@ -470,7 +527,6 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
                         logger.warning("收到未匹配的响应，消息ID: " + messageId);
                     }
                 } else {
-                    // 处理请求，这里可以添加额外的逻辑，如有需要
                     logger.info("收到请求，消息ID: " + messageId);
                 }
             } catch (IOException e) {
@@ -509,6 +565,54 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
     public void extensionUnloaded() {
         executorService.shutdown();
         stopForwarding();
+    }
+
+    @Override
+    public boolean matches(ProxyHttpRequestResponse requestResponse) {
+        HttpRequestResponse httpRequestResponse = requestResponse.finalRequestResponse();
+        ByteArray requestBytes = httpRequestResponse.request().toByteArray();
+        byte[] request = requestBytes.getBytes();
+        IRequestInfo requestInfo = helpers.analyzeRequest(request);
+        String url = requestInfo.getUrl().toString();
+        String method = requestInfo.getMethod();
+        String host = requestInfo.getUrl().getHost();
+
+        for (int i = 0; i < ruleTableModel.getRowCount(); i++) {
+            String filterMethod = (String) ruleTableModel.getValueAt(i, 1);
+            String rule = (String) ruleTableModel.getValueAt(i, 2);
+            boolean isActive = (Boolean) ruleTableModel.getValueAt(i, 3);
+
+            if (!isActive) continue;
+
+            switch (filterMethod) {
+                case "文件名过滤":
+                    if (url.toLowerCase().endsWith(rule.trim().toLowerCase())) {
+                        return true;
+                    }
+                    break;
+                case "域名过滤":
+                    if (Pattern.matches(rule, host)) {
+                        return true;
+                    }
+                    break;
+                case "HTTP方法过滤":
+                    if (method.equalsIgnoreCase(rule.trim())) {
+                        return true;
+                    }
+                    break;
+                case "IP过滤":
+                    try {
+                        String ip = InetAddress.getByName(host).getHostAddress();
+                        if (ip.equals(rule.trim())) {
+                            return true;
+                        }
+                    } catch (UnknownHostException e) {
+                        logger.log(Level.WARNING, "无法解析主机名: " + host, e);
+                    }
+                    break;
+            }
+        }
+        return false;
     }
 
     private class ConfigManager {
