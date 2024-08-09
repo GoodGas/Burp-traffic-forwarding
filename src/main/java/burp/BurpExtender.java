@@ -1,5 +1,13 @@
 package burp;
 
+import burp.api.montoya.BurpExtension;
+import burp.api.montoya.MontoyaApi;
+import burp.api.montoya.core.ByteArray;
+import burp.api.montoya.http.message.HttpRequestResponse;
+import burp.api.montoya.proxy.Proxy;
+import burp.api.montoya.proxy.ProxyHttpRequestResponse;
+import burp.api.montoya.proxy.ProxyHistoryFilter;
+
 import javax.swing.*;
 import javax.swing.event.TableModelEvent;
 import javax.swing.event.TableModelListener;
@@ -20,9 +28,8 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.regex.Pattern;
 
-public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtensionStateListener {
-    private IBurpExtenderCallbacks callbacks;
-    private IExtensionHelpers helpers;
+public class BurpExtender implements BurpExtension, ProxyHistoryFilter {
+    private MontoyaApi api;
     private JPanel mainPanel;
     private JTextField serverIpField;
     private JTextField serverPortField;
@@ -49,20 +56,21 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
     private static final String RESPONSE_PREFIX = "RESPONSE:";
 
     @Override
-    public void registerExtenderCallbacks(IBurpExtenderCallbacks callbacks) {
-        this.callbacks = callbacks;
-        this.helpers = callbacks.getHelpers();
-        callbacks.setExtensionName("HTTP Forwarder");
+    public void initialize(MontoyaApi api) {
+        this.api = api;
+        api.extension().setName("HTTP Forwarder");
 
-        configManager = new ConfigManager(callbacks);
+        configManager = new ConfigManager(api);
         configManager.loadConfig();
 
         SwingUtilities.invokeLater(this::initializeUI);
 
         executorService = Executors.newCachedThreadPool();
 
-        callbacks.registerHttpListener(this);
-        callbacks.registerExtensionStateListener(this);
+        api.proxy().registerRequestHandler(this::processRequest);
+        api.proxy().registerResponseHandler(this::processResponse);
+
+        new Thread(this::handleResponses).start();
     }
 
     private void initializeUI() {
@@ -189,7 +197,7 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
 
         loadSavedRules();
 
-        callbacks.addSuiteTab(this);
+        api.userInterface().registerSuiteTab("HTTP Forwarder", mainPanel);
     }
 
     private void loadSavedRules() {
@@ -293,8 +301,6 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
                     stopButton.setEnabled(true);
                     JOptionPane.showMessageDialog(mainPanel, "转发已启动。", "信息", JOptionPane.INFORMATION_MESSAGE);
                 });
-
-                new Thread(this::handleResponses).start();
             } catch (IOException e) {
                 SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(mainPanel, "启动转发时出错: " + e.getMessage(), "错误", JOptionPane.ERROR_MESSAGE));
                 logger.log(Level.SEVERE, "启动转发失败", e);
@@ -320,152 +326,143 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
         JOptionPane.showMessageDialog(mainPanel, "转发已停止。", "信息", JOptionPane.INFORMATION_MESSAGE);
     }
 
-    @Override
-    public String getTabCaption() {
-        return "HTTP Forwarder";
-    }
-
-    @Override
-    public Component getUiComponent() {
-        return mainPanel;
-    }
-
-    @Override
-    public void processHttpMessage(int toolFlag, boolean messageIsRequest, IHttpRequestResponse messageInfo) {
+    private void processRequest(ProxyHttpRequestResponse requestResponse) {
         if (!isRunning || persistentSocket == null || persistentSocket.isClosed()) return;
 
         executorService.submit(() -> {
             try {
-                if (messageIsRequest) {
-                    processRequest(messageInfo);
-                } else {
-                    processResponse(messageInfo);
+                HttpRequestResponse httpRequestResponse = requestResponse.finalRequestResponse();
+                ByteArray requestBytes = httpRequestResponse.request().toByteArray();
+                String url = httpRequestResponse.url();
+                String method = httpRequestResponse.request().method();
+                String host = httpRequestResponse.request().httpService().host();
+
+                boolean shouldFilter = false;
+                for (int i = 0; i < ruleTableModel.getRowCount(); i++) {
+                    String filterMethod = (String) ruleTableModel.getValueAt(i, 1);
+                    String rule = (String) ruleTableModel.getValueAt(i, 2);
+                    boolean isActive = (Boolean) ruleTableModel.getValueAt(i, 3);
+
+                    if (!isActive) continue;
+
+                    switch (filterMethod) {
+                        case "文件名过滤":
+                            if (url.toLowerCase().endsWith(rule.trim().toLowerCase())) {
+                                shouldFilter = true;
+                            }
+                            break;
+                        case "域名过滤":
+                            if (Pattern.matches(rule, host)) {
+                                shouldFilter = true;
+                            }
+                            break;
+                        case "HTTP方法过滤":
+                            if (method.equalsIgnoreCase(rule.trim())) {
+                                shouldFilter = true;
+                            }
+                            break;
+                        case "IP过滤":
+                            try {
+                                String ip = InetAddress.getByName(host).getHostAddress();
+                                if (ip.equals(rule.trim())) {
+                                    shouldFilter = true;
+                                }
+                            } catch (UnknownHostException e) {
+                                logger.log(Level.WARNING, "无法解析主机名: " + host, e);
+                            }
+                            break;
+                    }
+
+                    if (shouldFilter) break;
+                }
+
+                int messageId = messageCounter.getAndIncrement();
+
+                if (shouldFilter) {
+                    filteredRequests.add(messageId);
+                    return;
+                }
+
+                CompletableFuture<byte[]> responseFuture = new CompletableFuture<>();
+                responseMap.put(messageId, responseFuture);
+
+                byte[] requestData = requestBytes.getBytes();
+                byte[] idBytes = ByteBuffer.allocate(4).putInt(messageId).array();
+
+                synchronized (persistentOutputStream) {
+                    persistentOutputStream.write((REQUEST_PREFIX + messageId + "\n").getBytes());
+                    persistentOutputStream.write(idBytes);
+                    persistentOutputStream.write(requestData);
+                    persistentOutputStream.write(MESSAGE_SEPARATOR);
+                    persistentOutputStream.flush();
+                }
+
+                try {
+                    byte[] responseData = responseFuture.get(30, TimeUnit.SECONDS);
+                    requestResponse.setResponse(ByteArray.byteArray(responseData));
+                } catch (InterruptedException | ExecutionException | TimeoutException e) {
+                    logger.log(Level.WARNING, "等待响应时出错", e);
+                } finally {
+                    responseMap.remove(messageId);
                 }
             } catch (Exception e) {
-                logger.log(Level.SEVERE, "处理 HTTP 消息时出错", e);
+                logger.log(Level.SEVERE, "处理请求时出错", e);
             }
         });
     }
 
-    private void processRequest(IHttpRequestResponse messageInfo) throws IOException {
-        IRequestInfo requestInfo = helpers.analyzeRequest(messageInfo);
-        String url = requestInfo.getUrl().toString();
-        String method = requestInfo.getMethod();
-        String host = requestInfo.getUrl().getHost();
+    private void processResponse(ProxyHttpRequestResponse requestResponse) {
+        if (!isRunning || persistentSocket == null || persistentSocket.isClosed()) return;
 
-        boolean shouldFilter = false;
-        for (int i = 0; i < ruleTableModel.getRowCount(); i++) {
-            String filterMethod = (String) ruleTableModel.getValueAt(i, 1);
-            String rule = (String) ruleTableModel.getValueAt(i, 2);
-            boolean isActive = (Boolean) ruleTableModel.getValueAt(i, 3);
+        executorService.submit(() -> {
+            try {
+                HttpRequestResponse httpRequestResponse = requestResponse.finalRequestResponse();
+                ByteArray responseBytes = httpRequestResponse.response().toByteArray();
+                int statusCode = httpRequestResponse.response().statusCode();
 
-            if (!isActive) continue;
+                int messageId = messageCounter.get() - 1; // 获取最后一个请求的ID
 
-            switch (filterMethod) {
-                case "文件名过滤":
-                    if (url.toLowerCase().endsWith(rule.trim().toLowerCase())) {
+                if (filteredRequests.remove(messageId)) {
+                    return;
+                }
+
+                boolean shouldFilter = false;
+                for (int i = 0; i < ruleTableModel.getRowCount(); i++) {
+                    String filterMethod = (String) ruleTableModel.getValueAt(i, 1);
+                    String rule = (String) ruleTableModel.getValueAt(i, 2);
+                    boolean isActive = (Boolean) ruleTableModel.getValueAt(i, 3);
+
+                    if (!isActive) continue;
+
+                    if (filterMethod.equals("状态码过滤") && String.valueOf(statusCode).equals(rule.trim())) {
                         shouldFilter = true;
+                        break;
                     }
-                    break;
-                case "域名过滤":
-                    if (Pattern.matches(rule, host)) {
-                        shouldFilter = true;
-                    }
-                    break;
-                case "HTTP方法过滤":
-                    if (method.equalsIgnoreCase(rule.trim())) {
-                        shouldFilter = true;
-                    }
-                    break;
-                case "IP过滤":
-                    try {
-                        String ip = InetAddress.getByName(host).getHostAddress();
-                        if (ip.equals(rule.trim())) {
-                            shouldFilter = true;
-                        }
-                    } catch (UnknownHostException e) {
-                        logger.log(Level.WARNING, "无法解析主机名: " + host, e);
-                    }
-                    break;
+                }
+
+                if (shouldFilter) {
+                    return;
+                }
+
+                byte[] responseData = responseBytes.getBytes();
+                byte[] idBytes = ByteBuffer.allocate(4).putInt(messageId).array();
+
+                synchronized (persistentOutputStream) {
+                    persistentOutputStream.write((RESPONSE_PREFIX + messageId + "\n").getBytes());
+                    persistentOutputStream.write(idBytes);
+                    persistentOutputStream.write(responseData);
+                    persistentOutputStream.write(MESSAGE_SEPARATOR);
+                    persistentOutputStream.flush();
+                }
+
+                CompletableFuture<byte[]> responseFuture = responseMap.get(messageId);
+                if (responseFuture != null) {
+                    responseFuture.complete(responseData);
+                }
+            } catch (Exception e) {
+                logger.log(Level.SEVERE, "处理响应时出错", e);
             }
-
-            if (shouldFilter) break;
-        }
-
-        int messageId = messageCounter.getAndIncrement();
-
-        if (shouldFilter) {
-            filteredRequests.add(messageId);
-            return;
-        }
-
-        CompletableFuture<byte[]> responseFuture = new CompletableFuture<>();
-        responseMap.put(messageId, responseFuture);
-
-        byte[] requestData = messageInfo.getRequest();
-        byte[] idBytes = ByteBuffer.allocate(4).putInt(messageId).array();
-
-        synchronized (persistentOutputStream) {
-            persistentOutputStream.write((REQUEST_PREFIX + messageId + "\n").getBytes());
-            persistentOutputStream.write(idBytes);
-            persistentOutputStream.write(requestData);
-            persistentOutputStream.write(MESSAGE_SEPARATOR);
-            persistentOutputStream.flush();
-        }
-
-        try {
-            byte[] responseData = responseFuture.get(30, TimeUnit.SECONDS);
-            messageInfo.setResponse(responseData);
-        } catch (InterruptedException | ExecutionException | TimeoutException e) {
-            logger.log(Level.WARNING, "等待响应时出错", e);
-        } finally {
-            responseMap.remove(messageId);
-        }
-    }
-
-    private void processResponse(IHttpRequestResponse messageInfo) throws IOException {
-        int messageId = messageCounter.get() - 1; // 获取最后一个请求的ID
-
-        if (filteredRequests.remove(messageId)) {
-            return;
-        }
-
-        IResponseInfo responseInfo = helpers.analyzeResponse(messageInfo.getResponse());
-        short statusCode = responseInfo.getStatusCode();
-
-        boolean shouldFilter = false;
-        for (int i = 0; i < ruleTableModel.getRowCount(); i++) {
-            String filterMethod = (String) ruleTableModel.getValueAt(i, 1);
-            String rule = (String) ruleTableModel.getValueAt(i, 2);
-            boolean isActive = (Boolean) ruleTableModel.getValueAt(i, 3);
-
-            if (!isActive) continue;
-
-            if (filterMethod.equals("状态码过滤") && String.valueOf(statusCode).equals(rule.trim())) {
-                shouldFilter = true;
-                break;
-            }
-        }
-
-        if (shouldFilter) {
-            return;
-        }
-
-        byte[] responseData = messageInfo.getResponse();
-        byte[] idBytes = ByteBuffer.allocate(4).putInt(messageId).array();
-
-        synchronized (persistentOutputStream) {
-            persistentOutputStream.write((RESPONSE_PREFIX + messageId + "\n").getBytes());
-            persistentOutputStream.write(idBytes);
-            persistentOutputStream.write(responseData);
-            persistentOutputStream.write(MESSAGE_SEPARATOR);
-            persistentOutputStream.flush();
-        }
-
-        CompletableFuture<byte[]> responseFuture = responseMap.get(messageId);
-        if (responseFuture != null) {
-            responseFuture.complete(responseData);
-        }
+        });
     }
 
     private void handleResponses() {
@@ -543,17 +540,19 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
     }
 
     @Override
-    public void extensionUnloaded() {
-        executorService.shutdown();
-        stopForwarding();
+    public boolean matches(ProxyHttpRequestResponse requestResponse) {
+        // 实现 ProxyHistoryFilter 接口的 matches 方法
+        // 这里可以根据需要进行匹配，例如根据 URL、方法等
+        // 这里简单地匹配所有请求
+        return true;
     }
 
     private class ConfigManager {
         private Properties config = new Properties();
         private File configFile;
 
-        public ConfigManager(IBurpExtenderCallbacks callbacks) {
-            String extensionFilePath = callbacks.getExtensionFilename();
+        public ConfigManager(MontoyaApi api) {
+            String extensionFilePath = api.extension().filename();
             File extensionFile = new File(extensionFilePath);
             configFile = new File(extensionFile.getParentFile(), "http_forwarder_config.properties");
         }
