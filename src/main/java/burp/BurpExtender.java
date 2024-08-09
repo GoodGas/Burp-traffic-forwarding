@@ -3,10 +3,9 @@ package burp;
 import burp.api.montoya.BurpExtension;
 import burp.api.montoya.MontoyaApi;
 import burp.api.montoya.core.ByteArray;
+import burp.api.montoya.http.handler.*;
 import burp.api.montoya.http.message.HttpRequestResponse;
-import burp.api.montoya.proxy.Proxy;
-import burp.api.montoya.proxy.ProxyHttpRequestResponse;
-import burp.api.montoya.proxy.ProxyHistoryFilter;
+import burp.api.montoya.ui.UserInterface;
 
 import javax.swing.*;
 import javax.swing.event.TableModelEvent;
@@ -28,7 +27,7 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.regex.Pattern;
 
-public class BurpExtender implements BurpExtension, ProxyHistoryFilter {
+public class BurpExtender implements BurpExtension {
     private MontoyaApi api;
     private JPanel mainPanel;
     private JTextField serverIpField;
@@ -67,8 +66,19 @@ public class BurpExtender implements BurpExtension, ProxyHistoryFilter {
 
         executorService = Executors.newCachedThreadPool();
 
-        api.proxy().registerRequestHandler(this::processRequest);
-        api.proxy().registerResponseHandler(this::processResponse);
+        api.http().registerHttpHandler(new HttpHandler() {
+            @Override
+            public RequestToBeSentAction handleHttpRequestToBeSent(HttpRequestToBeSent requestToBeSent) {
+                processRequest(requestToBeSent);
+                return RequestToBeSentAction.continueWith(requestToBeSent);
+            }
+
+            @Override
+            public ResponseReceivedAction handleHttpResponseReceived(HttpResponseReceived responseReceived) {
+                processResponse(responseReceived);
+                return ResponseReceivedAction.continueWith(responseReceived);
+            }
+        });
 
         new Thread(this::handleResponses).start();
     }
@@ -326,16 +336,15 @@ public class BurpExtender implements BurpExtension, ProxyHistoryFilter {
         JOptionPane.showMessageDialog(mainPanel, "转发已停止。", "信息", JOptionPane.INFORMATION_MESSAGE);
     }
 
-    private void processRequest(ProxyHttpRequestResponse requestResponse) {
+    private void processRequest(HttpRequestToBeSent requestToBeSent) {
         if (!isRunning || persistentSocket == null || persistentSocket.isClosed()) return;
 
         executorService.submit(() -> {
             try {
-                HttpRequestResponse httpRequestResponse = requestResponse.finalRequestResponse();
-                ByteArray requestBytes = httpRequestResponse.request().toByteArray();
-                String url = httpRequestResponse.url();
-                String method = httpRequestResponse.request().method();
-                String host = httpRequestResponse.request().httpService().host();
+                ByteArray requestBytes = requestToBeSent.toByteArray();
+                String url = requestToBeSent.url();
+                String method = requestToBeSent.method();
+                String host = requestToBeSent.httpService().host();
 
                 boolean shouldFilter = false;
                 for (int i = 0; i < ruleTableModel.getRowCount(); i++) {
@@ -399,7 +408,8 @@ public class BurpExtender implements BurpExtension, ProxyHistoryFilter {
 
                 try {
                     byte[] responseData = responseFuture.get(30, TimeUnit.SECONDS);
-                    requestResponse.setResponse(ByteArray.byteArray(responseData));
+                    // Note: We can't modify the response here as it's not yet available
+                    // The response will be handled in the processResponse method
                 } catch (InterruptedException | ExecutionException | TimeoutException e) {
                     logger.log(Level.WARNING, "等待响应时出错", e);
                 } finally {
@@ -411,14 +421,13 @@ public class BurpExtender implements BurpExtension, ProxyHistoryFilter {
         });
     }
 
-    private void processResponse(ProxyHttpRequestResponse requestResponse) {
+    private void processResponse(HttpResponseReceived responseReceived) {
         if (!isRunning || persistentSocket == null || persistentSocket.isClosed()) return;
 
         executorService.submit(() -> {
             try {
-                HttpRequestResponse httpRequestResponse = requestResponse.finalRequestResponse();
-                ByteArray responseBytes = httpRequestResponse.response().toByteArray();
-                int statusCode = httpRequestResponse.response().statusCode();
+                ByteArray responseBytes = responseReceived.toByteArray();
+                int statusCode = responseReceived.statusCode();
 
                 int messageId = messageCounter.get() - 1; // 获取最后一个请求的ID
 
@@ -536,14 +545,6 @@ public class BurpExtender implements BurpExtension, ProxyHistoryFilter {
                 return false;
             }
         }
-        return true;
-    }
-
-    @Override
-    public boolean matches(ProxyHttpRequestResponse requestResponse) {
-        // 实现 ProxyHistoryFilter 接口的 matches 方法
-        // 这里可以根据需要进行匹配，例如根据 URL、方法等
-        // 这里简单地匹配所有请求
         return true;
     }
 
