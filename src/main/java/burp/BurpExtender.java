@@ -9,8 +9,9 @@ import java.io.*;
 import java.net.Socket;
 import java.util.*;
 import java.util.List;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.*;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtensionStateListener {
     private IBurpExtenderCallbacks callbacks;
@@ -26,13 +27,13 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
     private JButton importConfigButton;
     private JTable ruleTable;
     private DefaultTableModel ruleTableModel;
-    private Properties config;
+    private ConfigManager configManager;
     private boolean isRunning = false;
     private ExecutorService executorService;
     private Socket persistentSocket;
     private OutputStream persistentOutputStream;
     private InputStream persistentInputStream;
-    private Map<IHttpRequestResponse, byte[]> requestResponseMap;
+    private static final Logger logger = Logger.getLogger(BurpExtender.class.getName());
 
     @Override
     public void registerExtenderCallbacks(IBurpExtenderCallbacks callbacks) {
@@ -43,10 +44,8 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
         SwingUtilities.invokeLater(this::initializeUI);
 
         executorService = Executors.newFixedThreadPool(10);
-        config = new Properties();
-        loadConfig();
-
-        requestResponseMap = new HashMap<>();
+        configManager = new ConfigManager();
+        configManager.loadConfig();
 
         callbacks.registerHttpListener(this);
         callbacks.registerExtensionStateListener(this);
@@ -58,7 +57,7 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
         gbc.insets = new Insets(5, 5, 5, 5);
         gbc.fill = GridBagConstraints.HORIZONTAL;
 
-        // First row
+        // 第一行
         gbc.gridx = 0;
         gbc.gridy = 0;
         mainPanel.add(new JLabel("转发服务器 IP:"), gbc);
@@ -66,7 +65,7 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
         gbc.gridx = 1;
         gbc.weightx = 1.0;
         serverIpField = new JTextField(15);
-        serverIpField.setText(config.getProperty("forwardingIp", ""));
+        serverIpField.setText(configManager.getProperty("forwardingIp", ""));
         mainPanel.add(serverIpField, gbc);
 
         gbc.gridx = 2;
@@ -76,7 +75,7 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
         gbc.gridx = 3;
         gbc.weightx = 0.5;
         serverPortField = new JTextField(5);
-        serverPortField.setText(config.getProperty("forwardingPort", ""));
+        serverPortField.setText(configManager.getProperty("forwardingPort", ""));
         mainPanel.add(serverPortField, gbc);
 
         gbc.gridx = 4;
@@ -93,7 +92,7 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
         stopButton.setEnabled(false);
         mainPanel.add(stopButton, gbc);
 
-        // Second row
+        // 第二行
         gbc.gridx = 0;
         gbc.gridy = 1;
         JButton addRuleButton = new JButton("添加规则");
@@ -117,7 +116,7 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
         importConfigButton = new JButton("导入配置");
         mainPanel.add(importConfigButton, gbc);
 
-        // Rule table
+        // 规则表格
         gbc.gridx = 0;
         gbc.gridy = 2;
         gbc.gridwidth = 7;
@@ -133,19 +132,19 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
             }
             @Override
             public boolean isCellEditable(int row, int column) {
-                return column == 4; // Only the notes column is editable
+                return column == 4; // 只有备注列可编辑
             }
         };
         ruleTable = new JTable(ruleTableModel);
 
-        // Center-align cell contents and make them non-editable (except notes)
+        // 居中对齐单元格内容并使其不可编辑（除备注外）
         DefaultTableCellRenderer centerRenderer = new DefaultTableCellRenderer();
         centerRenderer.setHorizontalAlignment(JLabel.CENTER);
         for (int i = 0; i < ruleTable.getColumnCount() - 1; i++) {
             ruleTable.getColumnModel().getColumn(i).setCellRenderer(centerRenderer);
         }
 
-        // Make headers bold and center-aligned
+        // 使表头加粗并居中对齐
         JTableHeader header = ruleTable.getTableHeader();
         header.setDefaultRenderer(new DefaultTableCellRenderer() {
             @Override
@@ -163,15 +162,15 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
         JScrollPane scrollPane = new JScrollPane(ruleTable);
         mainPanel.add(scrollPane, gbc);
 
-        // Add action listeners
+        // 添加动作监听器
         testConnectionButton.addActionListener(e -> testConnection());
         startButton.addActionListener(e -> startForwarding());
         stopButton.addActionListener(e -> stopForwarding());
         addRuleButton.addActionListener(e -> addNewRule());
         deleteRuleButton.addActionListener(e -> deleteSelectedRule());
-        saveConfigButton.addActionListener(e -> saveConfig());
-        exportConfigButton.addActionListener(e -> exportConfig());
-        importConfigButton.addActionListener(e -> importConfig());
+        saveConfigButton.addActionListener(e -> configManager.saveConfig());
+        exportConfigButton.addActionListener(e -> configManager.exportConfig());
+        importConfigButton.addActionListener(e -> configManager.importConfig());
 
         callbacks.addSuiteTab(this);
     }
@@ -185,13 +184,14 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
             return;
         }
 
-        try {
-            Socket socket = new Socket(serverIp, Integer.parseInt(serverPort));
-            socket.close();
-            JOptionPane.showMessageDialog(mainPanel, "连接成功！", "测试结果", JOptionPane.INFORMATION_MESSAGE);
-        } catch (Exception e) {
-            JOptionPane.showMessageDialog(mainPanel, "连接失败: " + e.getMessage(), "测试结果", JOptionPane.ERROR_MESSAGE);
-        }
+        CompletableFuture.runAsync(() -> {
+            try (Socket socket = new Socket(serverIp, Integer.parseInt(serverPort))) {
+                SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(mainPanel, "连接成功！", "测试结果", JOptionPane.INFORMATION_MESSAGE));
+            } catch (Exception e) {
+                SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(mainPanel, "连接失败: " + e.getMessage(), "测试结果", JOptionPane.ERROR_MESSAGE));
+                logger.log(Level.WARNING, "测试连接失败", e);
+            }
+        });
     }
 
     private void addNewRule() {
@@ -222,34 +222,6 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
         }
     }
 
-    private void saveConfig() {
-        String serverIp = serverIpField.getText().trim();
-        String serverPort = serverPortField.getText().trim();
-
-        if (serverIp.isEmpty() || serverPort.isEmpty()) {
-            JOptionPane.showMessageDialog(mainPanel, "请输入服务器 IP 和端口。", "错误", JOptionPane.ERROR_MESSAGE);
-            return;
-        }
-
-        config.setProperty("forwardingIp", serverIp);
-        config.setProperty("forwardingPort", serverPort);
-
-        config.setProperty("ruleCount", String.valueOf(ruleTableModel.getRowCount()));
-        for (int i = 0; i < ruleTableModel.getRowCount(); i++) {
-            config.setProperty("rule_" + i + "_method", (String) ruleTableModel.getValueAt(i, 1));
-            config.setProperty("rule_" + i + "_rule", (String) ruleTableModel.getValueAt(i, 2));
-            config.setProperty("rule_" + i + "_status", String.valueOf(ruleTableModel.getValueAt(i, 3)));
-            config.setProperty("rule_" + i + "_note", (String) ruleTableModel.getValueAt(i, 4));
-        }
-
-        try (OutputStream output = new FileOutputStream("config.properties")) {
-            config.store(output, null);
-            JOptionPane.showMessageDialog(mainPanel, "配置已保存并启用。", "信息", JOptionPane.INFORMATION_MESSAGE);
-        } catch (IOException io) {
-            JOptionPane.showMessageDialog(mainPanel, "保存配置时出错: " + io.getMessage(), "错误", JOptionPane.ERROR_MESSAGE);
-        }
-    }
-
     private void startForwarding() {
         String serverIp = serverIpField.getText().trim();
         String serverPort = serverPortField.getText().trim();
@@ -259,21 +231,26 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
             return;
         }
 
-        config.setProperty("forwardingIp", serverIp);
-        config.setProperty("forwardingPort", serverPort);
+        configManager.setProperty("forwardingIp", serverIp);
+        configManager.setProperty("forwardingPort", serverPort);
 
-        try {
-            persistentSocket = new Socket(serverIp, Integer.parseInt(serverPort));
-            persistentOutputStream = persistentSocket.getOutputStream();
-            persistentInputStream = persistentSocket.getInputStream();
-            
-            isRunning = true;
-            startButton.setEnabled(false);
-            stopButton.setEnabled(true);
-            JOptionPane.showMessageDialog(mainPanel, "转发已启动。", "信息", JOptionPane.INFORMATION_MESSAGE);
-        } catch (IOException e) {
-            JOptionPane.showMessageDialog(mainPanel, "启动转发时出错: " + e.getMessage(), "错误", JOptionPane.ERROR_MESSAGE);
-        }
+        CompletableFuture.runAsync(() -> {
+            try {
+                persistentSocket = new Socket(serverIp, Integer.parseInt(serverPort));
+                persistentOutputStream = persistentSocket.getOutputStream();
+                persistentInputStream = persistentSocket.getInputStream();
+                
+                isRunning = true;
+                SwingUtilities.invokeLater(() -> {
+                    startButton.setEnabled(false);
+                    stopButton.setEnabled(true);
+                    JOptionPane.showMessageDialog(mainPanel, "转发已启动。", "信息", JOptionPane.INFORMATION_MESSAGE);
+                });
+            } catch (IOException e) {
+                SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(mainPanel, "启动转发时出错: " + e.getMessage(), "错误", JOptionPane.ERROR_MESSAGE));
+                logger.log(Level.SEVERE, "启动转发失败", e);
+            }
+        });
     }
 
     private void stopForwarding() {
@@ -288,68 +265,10 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
             persistentOutputStream = null;
             persistentInputStream = null;
         } catch (IOException e) {
-            callbacks.printError("关闭连接时出错: " + e.getMessage());
+            logger.log(Level.WARNING, "关闭连接时出错", e);
         }
         
         JOptionPane.showMessageDialog(mainPanel, "转发已停止。", "信息", JOptionPane.INFORMATION_MESSAGE);
-    }
-
-    private void exportConfig() {
-        JFileChooser fileChooser = new JFileChooser();
-        if (fileChooser.showSaveDialog(mainPanel) == JFileChooser.APPROVE_OPTION) {
-            File file = fileChooser.getSelectedFile();
-            try (ObjectOutputStream oos = new ObjectOutputStream(new FileOutputStream(file))) {
-                Properties exportConfig = new Properties();
-                exportConfig.putAll(config);
-                exportConfig.setProperty("ruleCount", String.valueOf(ruleTableModel.getRowCount()));
-                for (int i = 0; i < ruleTableModel.getRowCount(); i++) {
-                    exportConfig.setProperty("rule_" + i + "_method", (String) ruleTableModel.getValueAt(i, 1));
-                    exportConfig.setProperty("rule_" + i + "_rule", (String) ruleTableModel.getValueAt(i, 2));
-                    exportConfig.setProperty("rule_" + i + "_status", String.valueOf(ruleTableModel.getValueAt(i, 3)));
-                    exportConfig.setProperty("rule_" + i + "_note", (String) ruleTableModel.getValueAt(i, 4));
-                }
-                oos.writeObject(exportConfig);
-                JOptionPane.showMessageDialog(mainPanel, "配置已成功导出。", "信息", JOptionPane.INFORMATION_MESSAGE);
-            } catch (IOException e) {
-                JOptionPane.showMessageDialog(mainPanel, "导出配置时出错: " + e.getMessage(), "错误", JOptionPane.ERROR_MESSAGE);
-            }
-        }
-    }
-
-    private void importConfig() {
-        JFileChooser fileChooser = new JFileChooser();
-        if (fileChooser.showOpenDialog(mainPanel) == JFileChooser.APPROVE_OPTION) {
-            File file = fileChooser.getSelectedFile();
-            try (ObjectInputStream ois = new ObjectInputStream(new FileInputStream(file))) {
-                Properties importedConfig = (Properties) ois.readObject();
-                config.clear();
-                config.putAll(importedConfig);
-                serverIpField.setText(config.getProperty("forwardingIp", ""));
-                serverPortField.setText(config.getProperty("forwardingPort", ""));
-
-                ruleTableModel.setRowCount(0);
-                int ruleCount = Integer.parseInt(config.getProperty("ruleCount", "0"));
-                for (int i = 0; i < ruleCount; i++) {
-                    String method = config.getProperty("rule_" + i + "_method");
-                    String rule = config.getProperty("rule_" + i + "_rule");
-                    boolean status = Boolean.parseBoolean(config.getProperty("rule_" + i + "_status"));
-                    String note = config.getProperty("rule_" + i + "_note");
-                    ruleTableModel.addRow(new Object[]{i + 1, method, rule, status, note});
-                }
-
-                JOptionPane.showMessageDialog(mainPanel, "配置已成功导入。", "信息", JOptionPane.INFORMATION_MESSAGE);
-            } catch (IOException | ClassNotFoundException e) {
-                JOptionPane.showMessageDialog(mainPanel, "导入配置时出错: " + e.getMessage(), "错误", JOptionPane.ERROR_MESSAGE);
-            }
-        }
-    }
-
-    private void loadConfig() {
-        try (InputStream input = new FileInputStream("config.properties")) {
-            config.load(input);
-        } catch (IOException ex) {
-            callbacks.printError("加载配置文件时出错: " + ex.getMessage());
-        }
     }
 
     @Override
@@ -369,97 +288,182 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
         executorService.submit(() -> {
             try {
                 if (messageIsRequest) {
-                    // 处理请求
-                    IRequestInfo requestInfo = helpers.analyzeRequest(messageInfo);
-                    String url = requestInfo.getUrl().toString().toLowerCase();
-
-                    // 应用过滤规则
-                    if (shouldFilter(requestInfo, null)) {
-                        // 如果请求被过滤，将其添加到 map 中，值为 null
-                        requestResponseMap.put(messageInfo, null);
-                        return;
-                    }
-
-                    // 转发请求
-                    byte[] modifiedRequest = forwardRequest(messageInfo.getRequest());
-                    // 将原始请求和修改后的请求存储在 map 中
-                    requestResponseMap.put(messageInfo, modifiedRequest);
+                    processRequest(messageInfo);
                 } else {
-                    // 处理响应
-                    byte[] originalRequest = requestResponseMap.get(messageInfo);
-                    if (originalRequest == null) {
-                        // 如果对应的请求被过滤，则不处理此响应
-                        return;
-                    }
-
-                    IResponseInfo responseInfo = helpers.analyzeResponse(messageInfo.getResponse());
-                    
-                    // 再次应用过滤规则（针对响应）
-                    IRequestInfo requestInfo = helpers.analyzeRequest(originalRequest);
-                    if (shouldFilter(requestInfo, responseInfo)) {
-                        // 如果响应被过滤，从 map 中移除
-                        requestResponseMap.remove(messageInfo);
-                        return;
-                    }
-
-                    // 转发响应
-                    byte[] modifiedResponse = forwardResponse(messageInfo.getResponse());
-                    messageInfo.setResponse(modifiedResponse);
-
-                    // 处理完毕，从 map 中移除
-                    requestResponseMap.remove(messageInfo);
+                    processResponse(messageInfo);
                 }
             } catch (Exception e) {
-                callbacks.printError("处理 HTTP 消息时出错: " + e.getMessage());
+                logger.log(Level.SEVERE, "处理 HTTP 消息时出错", e);
             }
         });
     }
 
-    private boolean shouldFilter(IRequestInfo requestInfo, IResponseInfo responseInfo) {
+    private void processRequest(IHttpRequestResponse messageInfo) throws IOException {
+        IRequestInfo requestInfo = helpers.analyzeRequest(messageInfo);
         String url = requestInfo.getUrl().toString().toLowerCase();
-        
+
+        // 应用过滤规则
         for (int i = 0; i < ruleTableModel.getRowCount(); i++) {
             String filterMethod = (String) ruleTableModel.getValueAt(i, 1);
             String rule = (String) ruleTableModel.getValueAt(i, 2);
             boolean isActive = (Boolean) ruleTableModel.getValueAt(i, 3);
-            
+
             if (!isActive) continue;
-            
+
             switch (filterMethod) {
                 case "黑名单扩展名":
-                    if (url.endsWith(rule.trim().toLowerCase())) return true;
+                    if (url.endsWith(rule.trim().toLowerCase())) return;
                     break;
                 case "域名过滤":
-                    if (url.matches(rule)) return true;
+                    if (!url.matches(rule)) return;
                     break;
                 case "HTTP方法过滤":
-                    if (requestInfo.getMethod().equalsIgnoreCase(rule.trim())) return true;
-                    break;
-                case "状态码过滤":
-                    if (responseInfo != null && String.valueOf(responseInfo.getStatusCode()).equals(rule.trim())) return true;
+                    if (!requestInfo.getMethod().equalsIgnoreCase(rule.trim())) return;
                     break;
                 case "IP过滤":
-                    if (requestInfo.getUrl().getHost().equals(rule.trim())) return true;
+                    if (!requestInfo.getUrl().getHost().equals(rule.trim())) return;
                     break;
             }
         }
-        return false;
-    }
 
-    private byte[] forwardRequest(byte[] request) throws IOException {
-        persistentOutputStream.write(request);
+        // 转发请求
+        persistentOutputStream.write(messageInfo.getRequest());
         persistentOutputStream.flush();
-        return request; // 返回可能被修改的请求
     }
 
-    private byte[] forwardResponse(byte[] response) throws IOException {
-        // 这里可以添加对响应的处理逻辑
-        return response; // 返回可能被修改的响应
+    private void processResponse(IHttpRequestResponse messageInfo) throws IOException {
+        IResponseInfo responseInfo = helpers.analyzeResponse(messageInfo.getResponse());
+
+        // 应用状态码过滤规则
+        for (int i = 0; i < ruleTableModel.getRowCount(); i++) {
+            String filterMethod = (String) ruleTableModel.getValueAt(i, 1);
+            String rule = (String) ruleTableModel.getValueAt(i, 2);
+            boolean isActive = (Boolean) ruleTableModel.getValueAt(i, 3);
+
+            if (!isActive) continue;
+
+            if ("状态码过滤".equals(filterMethod)) {
+                if (!String.valueOf(responseInfo.getStatusCode()).equals(rule.trim())) return;
+            }
+        }
+
+        // 读取转发的响应
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        byte[] buffer = new byte[4096];
+        int bytesRead;
+        while ((bytesRead = persistentInputStream.read(buffer)) != -1) {
+            baos.write(buffer, 0, bytesRead);
+            if (persistentInputStream.available() == 0) break;
+        }
+
+        // 设置转发的响应
+        messageInfo.setResponse(baos.toByteArray());
     }
 
     @Override
     public void extensionUnloaded() {
         executorService.shutdown();
         stopForwarding();
+    }
+
+    private class ConfigManager {
+        private Properties config = new Properties();
+
+        public void loadConfig() {
+            try (InputStream input = new FileInputStream("config.properties")) {
+                config.load(input);
+            } catch (IOException ex) {
+                logger.log(Level.WARNING, "加载配置文件时出错", ex);
+            }
+        }
+
+        public void saveConfig() {
+            String serverIp = serverIpField.getText().trim();
+            String serverPort = serverPortField.getText().trim();
+
+            if (serverIp.isEmpty() || serverPort.isEmpty()) {
+                JOptionPane.showMessageDialog(mainPanel, "请输入服务器 IP 和端口。", "错误", JOptionPane.ERROR_MESSAGE);
+                return;
+            }
+
+            setProperty("forwardingIp", serverIp);
+            setProperty("forwardingPort", serverPort);
+
+            setProperty("ruleCount", String.valueOf(ruleTableModel.getRowCount()));
+            for (int i = 0; i < ruleTableModel.getRowCount(); i++) {
+                setProperty("rule_" + i + "_method", (String) ruleTableModel.getValueAt(i, 1));
+                setProperty("rule_" + i + "_rule", (String) ruleTableModel.getValueAt(i, 2));
+                setProperty("rule_" + i + "_status", String.valueOf(ruleTableModel.getValueAt(i, 3)));
+                setProperty("rule_" + i + "_note", (String) ruleTableModel.getValueAt(i, 4));
+            }
+
+            try (OutputStream output = new FileOutputStream("config.properties")) {
+                config.store(output, null);
+                JOptionPane.showMessageDialog(mainPanel, "配置已保存并启用。", "信息", JOptionPane.INFORMATION_MESSAGE);
+            } catch (IOException io) {
+                JOptionPane.showMessageDialog(mainPanel, "保存配置时出错: " + io.getMessage(), "错误", JOptionPane.ERROR_MESSAGE);
+                logger.log(Level.SEVERE, "保存配置失败", io);
+            }
+        }
+
+        public void exportConfig() {
+            JFileChooser fileChooser = new JFileChooser();
+            if (fileChooser.showSaveDialog(mainPanel) == JFileChooser.APPROVE_OPTION) {
+                File file = fileChooser.getSelectedFile();
+                try (ObjectOutputStream oos = new ObjectOutputStream(new FileOutputStream(file))) {
+                    Properties exportConfig = new Properties();
+                    exportConfig.putAll(config);
+                    exportConfig.setProperty("ruleCount", String.valueOf(ruleTableModel.getRowCount()));
+                    for (int i = 0; i < ruleTableModel.getRowCount(); i++) {
+                        exportConfig.setProperty("rule_" + i + "_method", (String) ruleTableModel.getValueAt(i, 1));
+                        exportConfig.setProperty("rule_" + i + "_rule", (String) ruleTableModel.getValueAt(i, 2));
+                        exportConfig.setProperty("rule_" + i + "_status", String.valueOf(ruleTableModel.getValueAt(i, 3)));
+                        exportConfig.setProperty("rule_" + i + "_note", (String) ruleTableModel.getValueAt(i, 4));
+                    }
+                    oos.writeObject(exportConfig);
+                    JOptionPane.showMessageDialog(mainPanel, "配置已成功导出。", "信息", JOptionPane.INFORMATION_MESSAGE);
+                } catch (IOException e) {
+                    JOptionPane.showMessageDialog(mainPanel, "导出配置时出错: " + e.getMessage(), "错误", JOptionPane.ERROR_MESSAGE);
+                    logger.log(Level.SEVERE, "导出配置失败", e);
+                }
+            }
+        }
+
+        public void importConfig() {
+            JFileChooser fileChooser = new JFileChooser();
+            if (fileChooser.showOpenDialog(mainPanel) == JFileChooser.APPROVE_OPTION) {
+                File file = fileChooser.getSelectedFile();
+                try (ObjectInputStream ois = new ObjectInputStream(new FileInputStream(file))) {
+                    Properties importedConfig = (Properties) ois.readObject();
+                    config.clear();
+                    config.putAll(importedConfig);
+                    serverIpField.setText(getProperty("forwardingIp", ""));
+                    serverPortField.setText(getProperty("forwardingPort", ""));
+
+                    ruleTableModel.setRowCount(0);
+                    int ruleCount = Integer.parseInt(getProperty("ruleCount", "0"));
+                    for (int i = 0; i < ruleCount; i++) {
+                        String method = getProperty("rule_" + i + "_method");
+                        String rule = getProperty("rule_" + i + "_rule");
+                        boolean status = Boolean.parseBoolean(getProperty("rule_" + i + "_status"));
+                        String note = getProperty("rule_" + i + "_note");
+                        ruleTableModel.addRow(new Object[]{i + 1, method, rule, status, note});
+                    }
+
+                    JOptionPane.showMessageDialog(mainPanel, "配置已成功导入。", "信息", JOptionPane.INFORMATION_MESSAGE);
+                } catch (IOException | ClassNotFoundException e) {
+                    JOptionPane.showMessageDialog(mainPanel, "导入配置时出错: " + e.getMessage(), "错误", JOptionPane.ERROR_MESSAGE);
+                    logger.log(Level.SEVERE, "导入配置失败", e);
+                }
+            }
+        }
+
+        public String getProperty(String key, String defaultValue) {
+            return config.getProperty(key, defaultValue);
+        }
+
+        public void setProperty(String key, String value) {
+            config.setProperty(key, value);
+        }
     }
 }
