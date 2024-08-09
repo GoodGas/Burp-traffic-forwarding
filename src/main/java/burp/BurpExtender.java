@@ -1,9 +1,7 @@
 package burp;
 
 import javax.swing.*;
-import javax.swing.table.DefaultTableCellRenderer;
 import javax.swing.table.DefaultTableModel;
-import javax.swing.table.JTableHeader;
 import java.awt.*;
 import java.io.*;
 import java.net.Socket;
@@ -117,7 +115,7 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
         gbc.gridwidth = 7;
         gbc.weighty = 1.0;
         gbc.fill = GridBagConstraints.BOTH;
-        
+      
         String[] columnNames = {"序号", "过滤方法", "过滤规则", "规则状态", "规则备注"};
         ruleTableModel = new DefaultTableModel(columnNames, 0) {
             @Override
@@ -127,33 +125,10 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
             }
             @Override
             public boolean isCellEditable(int row, int column) {
-                return column == 4; // Only the notes column is editable
+                return column != 0; // 序号列不可编辑
             }
         };
         ruleTable = new JTable(ruleTableModel);
-
-        // Center-align cell contents and make them non-editable (except notes)
-        DefaultTableCellRenderer centerRenderer = new DefaultTableCellRenderer();
-        centerRenderer.setHorizontalAlignment(JLabel.CENTER);
-        for (int i = 0; i < ruleTable.getColumnCount() - 1; i++) {
-            ruleTable.getColumnModel().getColumn(i).setCellRenderer(centerRenderer);
-        }
-
-        // Make headers bold and center-aligned
-        JTableHeader header = ruleTable.getTableHeader();
-        header.setDefaultRenderer(new DefaultTableCellRenderer() {
-            @Override
-            public Component getTableCellRendererComponent(JTable table, Object value,
-                                                           boolean isSelected, boolean hasFocus,
-                                                           int row, int column) {
-                JLabel label = (JLabel) super.getTableCellRendererComponent(table, value,
-                        isSelected, hasFocus, row, column);
-                label.setHorizontalAlignment(JLabel.CENTER);
-                label.setFont(label.getFont().deriveFont(Font.BOLD));
-                return label;
-            }
-        });
-
         JScrollPane scrollPane = new JScrollPane(ruleTable);
         mainPanel.add(scrollPane, gbc);
 
@@ -193,7 +168,7 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
         String filterMethod = (String) JOptionPane.showInputDialog(mainPanel, 
             "选择过滤方法:", "添加新规则", JOptionPane.QUESTION_MESSAGE, null, 
             filterMethods, filterMethods[0]);
-        
+      
         if (filterMethod != null) {
             String rule = JOptionPane.showInputDialog(mainPanel, "输入规则:");
             if (rule != null) {
@@ -346,15 +321,15 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
                 IRequestInfo requestInfo = helpers.analyzeRequest(messageInfo);
                 IResponseInfo responseInfo = messageIsRequest ? null : helpers.analyzeResponse(messageInfo.getResponse());
                 String url = requestInfo.getUrl().toString().toLowerCase();
-                
+              
                 // 应用过滤规则
                 for (int i = 0; i < ruleTableModel.getRowCount(); i++) {
                     String filterMethod = (String) ruleTableModel.getValueAt(i, 1);
                     String rule = (String) ruleTableModel.getValueAt(i, 2);
                     boolean isActive = (Boolean) ruleTableModel.getValueAt(i, 3);
-                    
+                  
                     if (!isActive) continue;
-                    
+                  
                     switch (filterMethod) {
                         case "黑名单扩展名":
                             if (url.endsWith(rule.trim().toLowerCase())) return;
@@ -410,4 +385,3 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
         executorService.shutdown();
     }
 }
-
