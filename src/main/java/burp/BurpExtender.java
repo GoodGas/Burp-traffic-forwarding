@@ -348,8 +348,16 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
         }
     }
 
-    private void processResponse(IHttpRequestResponse messageInfo) {
-        // 这个方法不再需要，因为响应将在handleResponses方法中处理
+    private void processResponse(IHttpRequestResponse messageInfo) throws IOException {
+        byte[] responseData = messageInfo.getResponse();
+        int messageId = messageCounter.getAndIncrement();
+        byte[] idBytes = ByteBuffer.allocate(4).putInt(messageId).array();
+
+        synchronized (persistentOutputStream) {
+            persistentOutputStream.write(idBytes);
+            persistentOutputStream.write(responseData);
+            persistentOutputStream.flush();
+        }
     }
 
     private void handleResponses() {
