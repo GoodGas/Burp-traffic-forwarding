@@ -1,6 +1,8 @@
 package burp;
 
 import javax.swing.*;
+import javax.swing.event.TableModelEvent;
+import javax.swing.event.TableModelListener;
 import javax.swing.table.DefaultTableCellRenderer;
 import javax.swing.table.DefaultTableModel;
 import javax.swing.table.JTableHeader;
@@ -42,6 +44,7 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
     private final ConcurrentHashMap<Integer, CompletableFuture<byte[]>> responseMap = new ConcurrentHashMap<>();
     private final AtomicInteger messageCounter = new AtomicInteger(0);
     private final Set<Integer> filteredRequests = Collections.newSetFromMap(new ConcurrentHashMap<>());
+    private static final byte[] MESSAGE_SEPARATOR = "\r\n\r\n".getBytes();
 
     @Override
     public void registerExtenderCallbacks(IBurpExtenderCallbacks callbacks) {
@@ -137,7 +140,7 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
             }
             @Override
             public boolean isCellEditable(int row, int column) {
-                return column == 3 || column == 4;
+                return column == 2 || column == 3 || column == 4;
             }
         };
         ruleTable = new JTable(ruleTableModel);
@@ -173,6 +176,14 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
         saveConfigButton.addActionListener(e -> configManager.saveConfig());
         exportConfigButton.addActionListener(e -> configManager.exportConfig());
         importConfigButton.addActionListener(e -> configManager.importConfig());
+
+        // 添加表格模型监听器，实现实时保存
+        ruleTableModel.addTableModelListener(new TableModelListener() {
+            @Override
+            public void tableChanged(TableModelEvent e) {
+                configManager.saveConfig();
+            }
+        });
 
         callbacks.addSuiteTab(this);
     }
@@ -225,6 +236,7 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
             if (rule != null && !rule.isEmpty()) {
                 int newRowIndex = ruleTableModel.getRowCount() + 1;
                 ruleTableModel.addRow(new Object[]{newRowIndex, filterMethod, rule, true, ""});
+                configManager.saveConfig(); // 添加新规则后保存配置
             }
         }
     }
@@ -236,6 +248,7 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
             for (int i = 0; i < ruleTableModel.getRowCount(); i++) {
                 ruleTableModel.setValueAt(i + 1, i, 0);
             }
+            configManager.saveConfig(); // 删除规则后保存配置
         } else {
             JOptionPane.showMessageDialog(mainPanel, "请选择要删除的规则。", "错误", JOptionPane.ERROR_MESSAGE);
         }
@@ -381,6 +394,7 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
         synchronized (persistentOutputStream) {
             persistentOutputStream.write(idBytes);
             persistentOutputStream.write(requestData);
+            persistentOutputStream.write(MESSAGE_SEPARATOR);
             persistentOutputStream.flush();
         }
 
@@ -429,6 +443,7 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
         synchronized (persistentOutputStream) {
             persistentOutputStream.write(idBytes);
             persistentOutputStream.write(responseData);
+            persistentOutputStream.write(MESSAGE_SEPARATOR);
             persistentOutputStream.flush();
         }
     }
@@ -447,10 +462,12 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
                 byte[] buffer = new byte[4096];
                 while ((bytesRead = persistentInputStream.read(buffer)) != -1) {
                     baos.write(buffer, 0, bytesRead);
-                    if (persistentInputStream.available() == 0) break;
+                    if (endsWith(baos.toByteArray(), MESSAGE_SEPARATOR)) {
+                        break;
+                    }
                 }
 
-                byte[] responseData = baos.toByteArray();
+                byte[] responseData = Arrays.copyOf(baos.toByteArray(), baos.size() - MESSAGE_SEPARATOR.length);
                 CompletableFuture<byte[]> responseFuture = responseMap.get(messageId);
                 if (responseFuture != null) {
                     responseFuture.complete(responseData);
@@ -461,6 +478,18 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
                 }
             }
         }
+    }
+
+    private boolean endsWith(byte[] array, byte[] suffix) {
+        if (array.length < suffix.length) {
+            return false;
+        }
+        for (int i = 0; i < suffix.length; i++) {
+            if (array[array.length - suffix.length + i] != suffix[i]) {
+                return false;
+            }
+        }
+        return true;
     }
 
     @Override
@@ -502,9 +531,7 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
 
             try (OutputStream output = new FileOutputStream("config.properties")) {
                 config.store(output, null);
-                JOptionPane.showMessageDialog(mainPanel, "配置已保存并启用。", "信息", JOptionPane.INFORMATION_MESSAGE);
             } catch (IOException io) {
-                JOptionPane.showMessageDialog(mainPanel, "保存配置时出错: " + io.getMessage(), "错误", JOptionPane.ERROR_MESSAGE);
                 logger.log(Level.SEVERE, "保存配置失败", io);
             }
         }
