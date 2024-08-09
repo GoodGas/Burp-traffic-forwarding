@@ -71,14 +71,12 @@ public class BurpExtender implements BurpExtension {
         api.http().registerHttpHandler(new HttpHandler() {
             @Override
             public RequestToBeSentAction handleHttpRequestToBeSent(HttpRequestToBeSent requestToBeSent) {
-                processRequest(requestToBeSent);
-                return RequestToBeSentAction.continueWith(requestToBeSent);
+                return processRequest(requestToBeSent);
             }
 
             @Override
             public ResponseReceivedAction handleHttpResponseReceived(HttpResponseReceived responseReceived) {
-                processResponse(responseReceived);
-                return ResponseReceivedAction.continueWith(responseReceived);
+                return processResponse(responseReceived);
             }
         });
 
@@ -338,8 +336,12 @@ public class BurpExtender implements BurpExtension {
         JOptionPane.showMessageDialog(mainPanel, "转发已停止。", "信息", JOptionPane.INFORMATION_MESSAGE);
     }
 
-    private void processRequest(HttpRequestToBeSent requestToBeSent) {
-        if (!isRunning || persistentSocket == null || persistentSocket.isClosed()) return;
+    private RequestToBeSentAction processRequest(HttpRequestToBeSent requestToBeSent) {
+        if (!isRunning || persistentSocket == null || persistentSocket.isClosed()) {
+            return RequestToBeSentAction.continueWith(requestToBeSent);
+        }
+
+        int messageId = messageCounter.getAndIncrement();
 
         executorService.submit(() -> {
             try {
@@ -387,8 +389,6 @@ public class BurpExtender implements BurpExtension {
                     if (shouldFilter) break;
                 }
 
-                int messageId = messageCounter.getAndIncrement();
-
                 if (shouldFilter) {
                     filteredRequests.add(messageId);
                     return;
@@ -409,9 +409,7 @@ public class BurpExtender implements BurpExtension {
                 }
 
                 try {
-                    byte[] responseData = responseFuture.get(30, TimeUnit.SECONDS);
-                    // Note: We can't modify the response here as it's not yet available
-                    // The response will be handled in the processResponse method
+                    responseFuture.get(30, TimeUnit.SECONDS);
                 } catch (InterruptedException | ExecutionException | TimeoutException e) {
                     logger.log(Level.WARNING, "等待响应时出错", e);
                 } finally {
@@ -421,17 +419,21 @@ public class BurpExtender implements BurpExtension {
                 logger.log(Level.SEVERE, "处理请求时出错", e);
             }
         });
+
+        return RequestToBeSentAction.continueWith(requestToBeSent);
     }
 
-    private void processResponse(HttpResponseReceived responseReceived) {
-        if (!isRunning || persistentSocket == null || persistentSocket.isClosed()) return;
+    private ResponseReceivedAction processResponse(HttpResponseReceived responseReceived) {
+        if (!isRunning || persistentSocket == null || persistentSocket.isClosed()) {
+            return ResponseReceivedAction.continueWith(responseReceived);
+        }
+
+        int messageId = messageCounter.get() - 1; // 获取最后一个请求的ID
 
         executorService.submit(() -> {
             try {
                 ByteArray responseBytes = responseReceived.toByteArray();
                 int statusCode = responseReceived.statusCode();
-
-                int messageId = messageCounter.get() - 1; // 获取最后一个请求的ID
 
                 if (filteredRequests.remove(messageId)) {
                     return;
@@ -474,6 +476,8 @@ public class BurpExtender implements BurpExtension {
                 logger.log(Level.SEVERE, "处理响应时出错", e);
             }
         });
+
+        return ResponseReceivedAction.continueWith(responseReceived);
     }
 
     private void handleResponses() {
