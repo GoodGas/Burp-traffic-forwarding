@@ -29,6 +29,9 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
     private Properties config;
     private boolean isRunning = false;
     private ExecutorService executorService;
+    private Socket persistentSocket;
+    private OutputStream persistentOutputStream;
+    private InputStream persistentInputStream;
 
     @Override
     public void registerExtenderCallbacks(IBurpExtenderCallbacks callbacks) {
@@ -256,16 +259,35 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
         config.setProperty("forwardingIp", serverIp);
         config.setProperty("forwardingPort", serverPort);
 
-        isRunning = true;
-        startButton.setEnabled(false);
-        stopButton.setEnabled(true);
-        JOptionPane.showMessageDialog(mainPanel, "转发已启动。", "信息", JOptionPane.INFORMATION_MESSAGE);
+        try {
+            persistentSocket = new Socket(serverIp, Integer.parseInt(serverPort));
+            persistentOutputStream = persistentSocket.getOutputStream();
+            persistentInputStream = persistentSocket.getInputStream();
+            
+            isRunning = true;
+            startButton.setEnabled(false);
+            stopButton.setEnabled(true);
+            JOptionPane.showMessageDialog(mainPanel, "转发已启动。", "信息", JOptionPane.INFORMATION_MESSAGE);
+        } catch (IOException e) {
+            JOptionPane.showMessageDialog(mainPanel, "启动转发时出错: " + e.getMessage(), "错误", JOptionPane.ERROR_MESSAGE);
+        }
     }
 
     private void stopForwarding() {
         isRunning = false;
         startButton.setEnabled(true);
         stopButton.setEnabled(false);
+        
+        try {
+            if (persistentSocket != null && !persistentSocket.isClosed()) {
+                persistentSocket.close();
+            }
+            persistentOutputStream = null;
+            persistentInputStream = null;
+        } catch (IOException e) {
+            callbacks.printError("关闭连接时出错: " + e.getMessage());
+        }
+        
         JOptionPane.showMessageDialog(mainPanel, "转发已停止。", "信息", JOptionPane.INFORMATION_MESSAGE);
     }
 
@@ -339,7 +361,7 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
 
     @Override
     public void processHttpMessage(int toolFlag, boolean messageIsRequest, IHttpRequestResponse messageInfo) {
-        if (!isRunning) return;
+        if (!isRunning || persistentSocket == null || persistentSocket.isClosed()) return;
 
         executorService.submit(() -> {
             try {
@@ -375,9 +397,7 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
                 }
 
                 // 转发请求
-                String serverIp = config.getProperty("forwardingIp");
-                int serverPort = Integer.parseInt(config.getProperty("forwardingPort"));
-                forwardRequest(messageInfo, serverIp, serverPort);
+                forwardRequest(messageInfo);
 
             } catch (Exception e) {
                 callbacks.printError("处理 HTTP 消息时出错: " + e.getMessage());
@@ -385,28 +405,31 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
         });
     }
 
-    private void forwardRequest(IHttpRequestResponse messageInfo, String serverIp, int serverPort) {
-        try (Socket socket = new Socket(serverIp, serverPort)) {
-            OutputStream os = socket.getOutputStream();
-            os.write(messageInfo.getRequest());
-            os.flush();
+    private void forwardRequest(IHttpRequestResponse messageInfo) {
+        try {
+            persistentOutputStream.write(messageInfo.getRequest());
+            persistentOutputStream.flush();
 
-            InputStream is = socket.getInputStream();
             ByteArrayOutputStream baos = new ByteArrayOutputStream();
             byte[] buffer = new byte[4096];
             int bytesRead;
-            while ((bytesRead = is.read(buffer)) != -1) {
+            while ((bytesRead = persistentInputStream.read(buffer)) != -1) {
                 baos.write(buffer, 0, bytesRead);
+                if (persistentInputStream.available() == 0) break;
             }
 
             messageInfo.setResponse(baos.toByteArray());
         } catch (IOException e) {
             callbacks.printError("转发请求时出错: " + e.getMessage());
+            // 如果出现错误，尝试重新建立连接
+            stopForwarding();
+            startForwarding();
         }
     }
 
     @Override
     public void extensionUnloaded() {
         executorService.shutdown();
+        stopForwarding();
     }
 }
