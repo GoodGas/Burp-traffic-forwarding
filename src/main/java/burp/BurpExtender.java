@@ -244,7 +244,7 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
         }
     }
 
-private void startForwarding() {
+    private void startForwarding() {
         String serverIp = serverIpField.getText().trim();
         String serverPort = serverPortField.getText().trim();
 
@@ -256,30 +256,16 @@ private void startForwarding() {
         config.setProperty("forwardingIp", serverIp);
         config.setProperty("forwardingPort", serverPort);
 
-        try {
-            forwardingSocket = new Socket(serverIp, Integer.parseInt(serverPort));
-            forwardingOutputStream = forwardingSocket.getOutputStream();
-            forwardingInputStream = forwardingSocket.getInputStream();
-            isRunning = true;
-            startButton.setEnabled(false);
-            stopButton.setEnabled(true);
-            JOptionPane.showMessageDialog(mainPanel, "转发已启动。", "信息", JOptionPane.INFORMATION_MESSAGE);
-        } catch (IOException e) {
-            JOptionPane.showMessageDialog(mainPanel, "启动转发时出错: " + e.getMessage(), "错误", JOptionPane.ERROR_MESSAGE);
-        }
+        isRunning = true;
+        startButton.setEnabled(false);
+        stopButton.setEnabled(true);
+        JOptionPane.showMessageDialog(mainPanel, "转发已启动。", "信息", JOptionPane.INFORMATION_MESSAGE);
     }
 
     private void stopForwarding() {
         isRunning = false;
         startButton.setEnabled(true);
         stopButton.setEnabled(false);
-        try {
-            if (forwardingSocket != null && !forwardingSocket.isClosed()) {
-                forwardingSocket.close();
-            }
-        } catch (IOException e) {
-            callbacks.printError("关闭转发连接时出错: " + e.getMessage());
-        }
         JOptionPane.showMessageDialog(mainPanel, "转发已停止。", "信息", JOptionPane.INFORMATION_MESSAGE);
     }
 
