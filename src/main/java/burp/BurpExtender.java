@@ -38,6 +38,7 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
     private static final Logger logger = Logger.getLogger(BurpExtender.class.getName());
     private final ConcurrentHashMap<Integer, CompletableFuture<byte[]>> responseMap = new ConcurrentHashMap<>();
     private final AtomicInteger messageCounter = new AtomicInteger(0);
+    private final Set<Integer> filteredRequests = Collections.newSetFromMap(new ConcurrentHashMap<>());
 
     @Override
     public void registerExtenderCallbacks(IBurpExtenderCallbacks callbacks) {
@@ -302,6 +303,7 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
         IRequestInfo requestInfo = helpers.analyzeRequest(messageInfo);
         String url = requestInfo.getUrl().toString().toLowerCase();
 
+        boolean shouldFilter = false;
         for (int i = 0; i < ruleTableModel.getRowCount(); i++) {
             String filterMethod = (String) ruleTableModel.getValueAt(i, 1);
             String rule = (String) ruleTableModel.getValueAt(i, 2);
@@ -311,21 +313,37 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
 
             switch (filterMethod) {
                 case "黑名单扩展名":
-                    if (url.endsWith(rule.trim().toLowerCase())) return;
+                    if (url.endsWith(rule.trim().toLowerCase())) {
+                        shouldFilter = true;
+                    }
                     break;
                 case "域名过滤":
-                    if (!url.matches(rule)) return;
+                    if (!url.matches(rule)) {
+                        shouldFilter = true;
+                    }
                     break;
                 case "HTTP方法过滤":
-                    if (!requestInfo.getMethod().equalsIgnoreCase(rule.trim())) return;
+                    if (!requestInfo.getMethod().equalsIgnoreCase(rule.trim())) {
+                        shouldFilter = true;
+                    }
                     break;
                 case "IP过滤":
-                    if (!requestInfo.getUrl().getHost().equals(rule.trim())) return;
+                    if (!requestInfo.getUrl().getHost().equals(rule.trim())) {
+                        shouldFilter = true;
+                    }
                     break;
             }
+
+            if (shouldFilter) break;
         }
 
         int messageId = messageCounter.getAndIncrement();
+
+        if (shouldFilter) {
+            filteredRequests.add(messageId);
+            return;
+        }
+
         CompletableFuture<byte[]> responseFuture = new CompletableFuture<>();
         responseMap.put(messageId, responseFuture);
 
@@ -349,8 +367,14 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
     }
 
     private void processResponse(IHttpRequestResponse messageInfo) throws IOException {
+        int messageId = messageCounter.get() - 1; // 获取最后一个请求的ID
+
+        if (filteredRequests.remove(messageId)) {
+            // 如果对应的请求被过滤了,我们也不转发这个响应
+            return;
+        }
+
         byte[] responseData = messageInfo.getResponse();
-        int messageId = messageCounter.getAndIncrement();
         byte[] idBytes = ByteBuffer.allocate(4).putInt(messageId).array();
 
         synchronized (persistentOutputStream) {
