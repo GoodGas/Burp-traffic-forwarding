@@ -44,7 +44,7 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
     private final ConcurrentHashMap<Integer, CompletableFuture<byte[]>> responseMap = new ConcurrentHashMap<>();
     private final AtomicInteger messageCounter = new AtomicInteger(0);
     private final Set<Integer> filteredRequests = Collections.newSetFromMap(new ConcurrentHashMap<>());
-    private static final byte[] MESSAGE_SEPARATOR = "\r\n\r\n".getBytes();
+    private static final byte[] MESSAGE_SEPARATOR = "\r\n====================================================\r\n".getBytes();
 
     @Override
     public void registerExtenderCallbacks(IBurpExtenderCallbacks callbacks) {
