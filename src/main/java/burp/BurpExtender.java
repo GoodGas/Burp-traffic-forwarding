@@ -365,77 +365,44 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
 
         executorService.submit(() -> {
             try {
-                if (messageIsRequest) {
-                    processRequest(messageInfo);
-                } else {
-                    processResponse(messageInfo);
+                IRequestInfo requestInfo = helpers.analyzeRequest(messageInfo);
+                IResponseInfo responseInfo = messageIsRequest ? null : helpers.analyzeResponse(messageInfo.getResponse());
+                String url = requestInfo.getUrl().toString().toLowerCase();
+                
+                // 应用过滤规则
+                for (int i = 0; i < ruleTableModel.getRowCount(); i++) {
+                    String filterMethod = (String) ruleTableModel.getValueAt(i, 1);
+                    String rule = (String) ruleTableModel.getValueAt(i, 2);
+                    boolean isActive = (Boolean) ruleTableModel.getValueAt(i, 3);
+                    
+                    if (!isActive) continue;
+                    
+                    switch (filterMethod) {
+                        case "黑名单扩展名":
+                            if (url.endsWith(rule.trim().toLowerCase())) return;
+                            break;
+                        case "域名过滤":
+                            if (!url.matches(rule)) return;
+                            break;
+                        case "HTTP方法过滤":
+                            if (!requestInfo.getMethod().equalsIgnoreCase(rule.trim())) return;
+                            break;
+                        case "状态码过滤":
+                            if (!messageIsRequest && !String.valueOf(responseInfo.getStatusCode()).equals(rule.trim())) return;
+                            break;
+                        case "IP过滤":
+                            if (!requestInfo.getUrl().getHost().equals(rule.trim())) return;
+                            break;
+                    }
                 }
+
+                // 转发请求
+                forwardRequest(messageInfo);
+
             } catch (Exception e) {
                 callbacks.printError("处理 HTTP 消息时出错: " + e.getMessage());
             }
         });
-    }
-
-    private void processRequest(IHttpRequestResponse messageInfo) throws IOException {
-        IRequestInfo requestInfo = helpers.analyzeRequest(messageInfo);
-        String url = requestInfo.getUrl().toString().toLowerCase();
-
-        // 应用过滤规则
-        for (int i = 0; i < ruleTableModel.getRowCount(); i++) {
-            String filterMethod = (String) ruleTableModel.getValueAt(i, 1);
-            String rule = (String) ruleTableModel.getValueAt(i, 2);
-            boolean isActive = (Boolean) ruleTableModel.getValueAt(i, 3);
-
-            if (!isActive) continue;
-
-            switch (filterMethod) {
-                case "黑名单扩展名":
-                    if (url.endsWith(rule.trim().toLowerCase())) return;
-                    break;
-                case "域名过滤":
-                    if (!url.matches(rule)) return;
-                    break;
-                case "HTTP方法过滤":
-                    if (!requestInfo.getMethod().equalsIgnoreCase(rule.trim())) return;
-                    break;
-                case "IP过滤":
-                    if (!requestInfo.getUrl().getHost().equals(rule.trim())) return;
-                    break;
-            }
-        }
-
-        // 转发请求
-        persistentOutputStream.write(messageInfo.getRequest());
-        persistentOutputStream.flush();
-    }
-
-    private void processResponse(IHttpRequestResponse messageInfo) throws IOException {
-        IResponseInfo responseInfo = helpers.analyzeResponse(messageInfo.getResponse());
-
-        // 应用状态码过滤规则
-        for (int i = 0; i < ruleTableModel.getRowCount(); i++) {
-            String filterMethod = (String) ruleTableModel.getValueAt(i, 1);
-            String rule = (String) ruleTableModel.getValueAt(i, 2);
-            boolean isActive = (Boolean) ruleTableModel.getValueAt(i, 3);
-
-            if (!isActive) continue;
-
-            if ("状态码过滤".equals(filterMethod)) {
-                if (!String.valueOf(responseInfo.getStatusCode()).equals(rule.trim())) return;
-            }
-        }
-
-        // 读取转发的响应
-        ByteArrayOutputStream baos = new ByteArrayOutputStream();
-        byte[] buffer = new byte[4096];
-        int bytesRead;
-        while ((bytesRead = persistentInputStream.read(buffer)) != -1) {
-            baos.write(buffer, 0, bytesRead);
-            if (persistentInputStream.available() == 0) break;
-        }
-
-        // 设置转发的响应
-        messageInfo.setResponse(baos.toByteArray());
     }
 
     private void forwardRequest(IHttpRequestResponse messageInfo) {
