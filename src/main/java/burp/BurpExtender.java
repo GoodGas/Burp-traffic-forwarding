@@ -61,7 +61,6 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
 
         executorService = Executors.newCachedThreadPool();
 
-
         callbacks.registerHttpListener(this);
         callbacks.registerExtensionStateListener(this);
     }
@@ -428,44 +427,7 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
     }
 
     private void processResponse(IHttpRequestResponse messageInfo) throws IOException {
-        int messageId = messageCounter.get() - 1; // 获取最后一个请求的ID
-
-        if (filteredRequests.remove(messageId)) {
-            // 如果对应的请求被过滤了,我们也不转发这个响应
-            return;
-        }
-
-        IResponseInfo responseInfo = helpers.analyzeResponse(messageInfo.getResponse());
-        short statusCode = responseInfo.getStatusCode();
-
-        boolean shouldFilter = false;
-        for (int i = 0; i < ruleTableModel.getRowCount(); i++) {
-            String filterMethod = (String) ruleTableModel.getValueAt(i, 1);
-            String rule = (String) ruleTableModel.getValueAt(i, 2);
-            boolean isActive = (Boolean) ruleTableModel.getValueAt(i, 3);
-
-            if (!isActive) continue;
-
-            if (filterMethod.equals("状态码过滤") && String.valueOf(statusCode).equals(rule.trim())) {
-                shouldFilter = true;
-                break;
-            }
-        }
-
-        if (shouldFilter) {
-            return;
-        }
-
-        byte[] responseData = messageInfo.getResponse();
-        byte[] idBytes = ByteBuffer.allocate(4).putInt(messageId).array();
-
-        synchronized (persistentOutputStream) {
-            persistentOutputStream.write((RESPONSE_PREFIX + messageId + "\n").getBytes());
-            persistentOutputStream.write(idBytes);
-            persistentOutputStream.write(responseData);
-            persistentOutputStream.write(MESSAGE_SEPARATOR);
-            persistentOutputStream.flush();
-        }
+        // 不在这里处理响应，而是在handleResponses方法中处理
     }
 
     private void handleResponses() {
@@ -504,7 +466,12 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IExtens
                     CompletableFuture<byte[]> responseFuture = responseMap.get(messageId);
                     if (responseFuture != null) {
                         responseFuture.complete(data);
+                    } else {
+                        logger.warning("收到未匹配的响应，消息ID: " + messageId);
                     }
+                } else {
+                    // 处理请求，这里可以添加额外的逻辑，如有需要
+                    logger.info("收到请求，消息ID: " + messageId);
                 }
             } catch (IOException e) {
                 if (isRunning) {
