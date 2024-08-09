@@ -3,12 +3,11 @@ package burp;
 import burp.api.montoya.BurpExtension;
 import burp.api.montoya.MontoyaApi;
 import burp.api.montoya.core.ByteArray;
-import burp.api.montoya.http.message.HttpRequest;
-import burp.api.montoya.http.message.HttpResponse;
-import burp.api.montoya.http.service.HttpService;
-import burp.api.montoya.http.handler.HttpHandler;
-import burp.api.mntoya.http.handler.HttpHandlerAction;
+import burp.api.montoya.http.handler.*;
+import burp.api.montoya.http.message.HttpRequestResponse;
 import burp.api.montoya.ui.UserInterface;
+import burp.api.montoya.http.message.requests.HttpRequest;
+import burp.api.montoya.http.message.responses.HttpResponse;
 
 import javax.swing.*;
 import javax.swing.event.TableModelEvent;
@@ -71,15 +70,15 @@ public class BurpExtender implements BurpExtension {
 
         api.http().registerHttpHandler(new HttpHandler() {
             @Override
-            public HttpHandlerAction handleHttpRequest(HttpRequest httpRequest) {
-                processRequest(httpRequest);
-                return HttpHandlerAction.followWith(httpRequest);
+            public RequestToBeSentAction handleHttpRequestToBeSent(HttpRequestToBeSent requestToBeSent) {
+                processRequest(requestToBeSent);
+                return RequestToBeSentAction.continueWith(requestToBeSent);
             }
 
             @Override
-            public HttpHandlerAction handleHttpResponse(HttpResponse httpResponse) {
-                processResponse(httpResponse);
-                return HttpHandlerAction.followWith(httpResponse);
+            public ResponseReceivedAction handleHttpResponseReceived(HttpResponseReceived responseReceived) {
+                processResponse(responseReceived);
+                return ResponseReceivedAction.continueWith(responseReceived);
             }
         });
 
