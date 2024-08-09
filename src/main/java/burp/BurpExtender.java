@@ -428,65 +428,69 @@ public class BurpExtender implements BurpExtension {
         });
     }
 
-    private void processResponse(HttpResponseReceived responseReceived) {
-        if (!isRunning || persistentSocket == null || persistentSocket.isClosed()) return;
+   private void processResponse(HttpResponseReceived responseReceived) {
+    if (!isRunning || persistentSocket == null || persistentSocket.isClosed()) return;
 
-        executorService.submit(() -> {
-            try {
-                ByteArray responseBytes = responseReceived.toByteArray();
-                int statusCode = responseReceived.statusCode();
+    executorService.submit(() -> {
+        try {
+            ByteArray responseBytes = responseReceived.toByteArray();
+            int statusCode = responseReceived.statusCode();
 
-                String requestKey = generateRequestKey(responseReceived.initiatingRequest());
+            String requestKey = generateRequestKey(responseReceived.initiatingRequest());
 
-                if (filteredRequests.remove(requestKey)) {
-                    return;
-                }
-
-                boolean shouldFilter = false;
-                for (int i = 0; i < ruleTableModel.getRowCount(); i++) {
-                    String filterMethod = (String) ruleTableModel.getValueAt(i, 1);
-                    String rule = (String) ruleTableModel.getValueAt(i, 2);
-                    boolean isActive = (Boolean) ruleTableModel.getValueAt(i, 3);
-
-                    if (!isActive) continue;
-
-                    if (filterMethod.equals("状态码过滤") && String.valueOf(statusCode).equals(rule.trim())) {
-                        shouldFilter = true;
-                        break;
-                    }
-                }
-
-                if (shouldFilter) {
-                    return;
-                }
-
-                byte[] responseData = responseBytes.getBytes();
-                byte[] keyBytes = requestKey.getBytes();
-
-                synchronized (persistentOutputStream) {
-                    persistentOutputStream.write((RESPONSE_PREFIX + requestKey + "\n").getBytes());
-                    persistentOutputStream.write(keyBytes);
-                    persistentOutputStream.write(responseData);
-                    persistentOutputStream.write(MESSAGE_SEPARATOR);
-                    persistentOutputStream.flush();
-                }
-
-                CompletableFuture<byte[]> responseFuture = responseMap.get(requestKey);
-                if (responseFuture != null) {
-                    responseFuture.complete(responseData);
-                }
-
-                // 更新请求和响应的映射关系
-                HttpRequestResponse existingRequestResponse = requestResponseMap.get(requestKey);
-                if (existingRequestResponse != null) {
-                    HttpRequestResponse updatedRequestResponse = existingRequestResponse.withResponse(responseReceived);
-                    requestResponseMap.put(requestKey, updatedRequestResponse);
-                }
-            } catch (Exception e) {
-                logger.log(Level.SEVERE, "处理响应时出错", e);
+            if (filteredRequests.remove(requestKey)) {
+                return;
             }
-        });
-    }
+
+            boolean shouldFilter = false;
+            for (int i = 0; i < ruleTableModel.getRowCount(); i++) {
+                String filterMethod = (String) ruleTableModel.getValueAt(i, 1);
+                String rule = (String) ruleTableModel.getValueAt(i, 2);
+                boolean isActive = (Boolean) ruleTableModel.getValueAt(i, 3);
+
+                if (!isActive) continue;
+
+                if (filterMethod.equals("状态码过滤") && String.valueOf(statusCode).equals(rule.trim())) {
+                    shouldFilter = true;
+                    break;
+                }
+            }
+
+            if (shouldFilter) {
+                return;
+            }
+
+            byte[] responseData = responseBytes.getBytes();
+            byte[] keyBytes = requestKey.getBytes();
+
+            synchronized (persistentOutputStream) {
+                persistentOutputStream.write((RESPONSE_PREFIX + requestKey + "\n").getBytes());
+                persistentOutputStream.write(keyBytes);
+                persistentOutputStream.write(responseData);
+                persistentOutputStream.write(MESSAGE_SEPARATOR);
+                persistentOutputStream.flush();
+            }
+
+            CompletableFuture<byte[]> responseFuture = responseMap.get(requestKey);
+            if (responseFuture != null) {
+                responseFuture.complete(responseData);
+            }
+
+            // 更新请求和响应的映射关系
+            HttpRequestResponse existingRequestResponse = requestResponseMap.get(requestKey);
+            if (existingRequestResponse != null) {
+                // 创建新的 HttpRequestResponse 对象
+                HttpRequestResponse updatedRequestResponse = HttpRequestResponse.httpRequestResponse(
+                    existingRequestResponse.request(),
+                    responseReceived
+                );
+                requestResponseMap.put(requestKey, updatedRequestResponse);
+            }
+        } catch (Exception e) {
+            logger.log(Level.SEVERE, "处理响应时出错", e);
+        }
+    });
+}
 
     private void handleResponses() {
         while (isRunning) {
