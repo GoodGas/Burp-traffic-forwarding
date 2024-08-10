@@ -42,11 +42,13 @@ public class BurpExtender implements BurpExtension {
     private JButton saveConfigButton;
     private JButton exportConfigButton;
     private JButton importConfigButton;
+    private JButton showMessagesButton;
     private JTable ruleTable;
     private DefaultTableModel ruleTableModel;
     private ConfigManager configManager;
     private boolean isRunning = false;
     private ExecutorService executorService;
+    private ScheduledExecutorService scheduledExecutorService;
     private Socket persistentSocket;
     private OutputStream persistentOutputStream;
     private InputStream persistentInputStream;
@@ -72,6 +74,7 @@ public class BurpExtender implements BurpExtension {
         SwingUtilities.invokeLater(this::initializeUI);
 
         executorService = Executors.newCachedThreadPool();
+        scheduledExecutorService = Executors.newScheduledThreadPool(1);
 
         api.http().registerHttpHandler(new HttpHandler() {
             @Override
@@ -86,6 +89,8 @@ public class BurpExtender implements BurpExtension {
                 return ResponseReceivedAction.continueWith(responseReceived);
             }
         });
+
+        checkUnmatchedRequests();
     }
 
     private void initializeUI() {
@@ -154,6 +159,10 @@ public class BurpExtender implements BurpExtension {
         gbc.gridx = 0;
         gbc.gridy = 2;
         gbc.gridwidth = 7;
+        showMessagesButton = new JButton("显示所有消息");
+        mainPanel.add(showMessagesButton, gbc);
+
+        gbc.gridy = 3;
         gbc.weighty = 1.0;
         gbc.fill = GridBagConstraints.BOTH;
         
@@ -202,6 +211,7 @@ public class BurpExtender implements BurpExtension {
         saveConfigButton.addActionListener(e -> configManager.saveConfig());
         exportConfigButton.addActionListener(e -> configManager.exportConfig());
         importConfigButton.addActionListener(e -> configManager.importConfig());
+        showMessagesButton.addActionListener(e -> showAllMessages());
 
         ruleTableModel.addTableModelListener(new TableModelListener() {
             @Override
@@ -355,6 +365,7 @@ public class BurpExtender implements BurpExtension {
                 int sequentialId = messageCounter.getAndIncrement();
 
                 if (shouldFilter) {
+                    logger.info("Request filtered: " + sequentialId);
                     return;
                 }
 
@@ -362,6 +373,7 @@ public class BurpExtender implements BurpExtension {
                 requestKeyToSequentialId.put(requestKey, sequentialId);
 
                 String requestMessage = String.format("%s%d\n%s", REQUEST_PREFIX, sequentialId, requestToBeSent.toString());
+                logger.info("Processing request: " + sequentialId);
                 logger.info(requestMessage);
 
                 pendingRequests.put(sequentialId, requestKey);
@@ -395,10 +407,12 @@ public class BurpExtender implements BurpExtension {
                 }
 
                 if (checkFilter(statusCode)) {
+                    logger.info("Response filtered: " + sequentialId);
                     return;
                 }
 
                 String responseMessage = String.format("%s%d\n%s", RESPONSE_PREFIX, sequentialId, responseReceived.toString());
+                logger.info("Processing response: " + sequentialId);
                 logger.info(responseMessage);
 
                 synchronized (persistentOutputStream) {
@@ -421,6 +435,15 @@ public class BurpExtender implements BurpExtension {
                 logger.log(Level.SEVERE, "处理响应时出错", e);
             }
         });
+    }
+
+    private void checkUnmatchedRequests() {
+        scheduledExecutorService.scheduleAtFixedRate(() -> {
+            logger.info("Checking unmatched requests...");
+            for (Map.Entry<Integer, String> entry : pendingRequests.entrySet()) {
+                logger.warning("Unmatched request: " + entry.getKey());
+            }
+        }, 0, 1, TimeUnit.MINUTES);
     }
 
     private boolean checkFilter(String url, String method, String host) {
@@ -538,7 +561,7 @@ public class BurpExtender implements BurpExtension {
         return hexString.toString();
     }
 
-    public List<String> getAllMessages() {
+    private List<String> getAllMessages() {
         List<String> allMessages = new ArrayList<>();
         for (Map.Entry<String, HttpRequestResponse> entry : requestResponseMap.entrySet()) {
             HttpRequestResponse requestResponse = entry.getValue();
@@ -551,6 +574,17 @@ public class BurpExtender implements BurpExtension {
             }
         }
         return allMessages;
+    }
+
+    private void showAllMessages() {
+        StringBuilder sb = new StringBuilder();
+        for (String message : getAllMessages()) {
+            sb.append(message).append("\n");
+        }
+        JTextArea textArea = new JTextArea(sb.toString());
+        JScrollPane scrollPane = new JScrollPane(textArea);
+        scrollPane.setPreferredSize(new Dimension(800, 600));
+        JOptionPane.showMessageDialog(mainPanel, scrollPane, "所有消息", JOptionPane.PLAIN_MESSAGE);
     }
 
     private class ConfigManager {
