@@ -8,6 +8,8 @@ import burp.api.montoya.http.message.HttpRequestResponse;
 import burp.api.montoya.ui.UserInterface;
 import burp.api.montoya.http.message.requests.HttpRequest;
 import burp.api.montoya.http.message.responses.HttpResponse;
+import burp.api.montoya.logging.LoggerListener;
+import burp.api.montoya.logging.LoggerCaptureHttpRequestResponse;
 
 import javax.swing.*;
 import javax.swing.event.TableModelEvent;
@@ -20,7 +22,7 @@ import java.io.*;
 import java.net.InetAddress;
 import java.net.Socket;
 import java.net.UnknownHostException;
-import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.*;
@@ -56,12 +58,11 @@ public class BurpExtender implements BurpExtension {
     private final ConcurrentHashMap<String, CompletableFuture<byte[]>> responseMap = new ConcurrentHashMap<>();
     private final AtomicInteger messageCounter = new AtomicInteger(0);
     private final Set<String> filteredRequests = Collections.newSetFromMap(new ConcurrentHashMap<>());
-    private static final byte[] MESSAGE_SEPARATOR = "\r\n====================================================\r\n".getBytes();
+    private static final byte[] MESSAGE_SEPARATOR = "\r\n====================================================\r\n".getBytes(StandardCharsets.UTF_8);
     private static final String REQUEST_PREFIX = "REQUEST:";
     private static final String RESPONSE_PREFIX = "RESPONSE:";
-    private final ConcurrentHashMap<String, HttpRequestResponse> requestResponseMap = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, LoggerCaptureHttpRequestResponse> requestResponseMap = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Integer> requestKeyToSequentialId = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<Integer, String> pendingRequests = new ConcurrentHashMap<>();
 
     @Override
     public void initialize(MontoyaApi api) {
@@ -79,18 +80,21 @@ public class BurpExtender implements BurpExtension {
         api.http().registerHttpHandler(new HttpHandler() {
             @Override
             public RequestToBeSentAction handleHttpRequestToBeSent(HttpRequestToBeSent requestToBeSent) {
-                processRequest(requestToBeSent);
                 return RequestToBeSentAction.continueWith(requestToBeSent);
             }
 
             @Override
             public ResponseReceivedAction handleHttpResponseReceived(HttpResponseReceived responseReceived) {
-                processResponse(responseReceived);
                 return ResponseReceivedAction.continueWith(responseReceived);
             }
         });
 
-        checkUnmatchedRequests();
+        api.logging().registerLoggerListener(new LoggerListener() {
+            @Override
+            public void captureHttpRequestResponse(LoggerCaptureHttpRequestResponse capture) {
+                processLoggerCapture(capture);
+            }
+        });
     }
 
     private void initializeUI() {
@@ -351,14 +355,16 @@ public class BurpExtender implements BurpExtension {
         JOptionPane.showMessageDialog(mainPanel, "转发已停止。", "信息", JOptionPane.INFORMATION_MESSAGE);
     }
 
-    private void processRequest(HttpRequestToBeSent requestToBeSent) {
+    private void processLoggerCapture(LoggerCaptureHttpRequestResponse capture) {
         if (!isRunning || persistentSocket == null || persistentSocket.isClosed()) return;
 
         executorService.submit(() -> {
             try {
-                String url = requestToBeSent.url();
-                String method = requestToBeSent.method();
-                String host = requestToBeSent.httpService().host();
+                HttpRequest request = capture.request();
+                HttpResponse response = capture.response();
+                String url = request.url();
+                String method = request.method();
+                String host = capture.httpService().host();
 
                 boolean shouldFilter = checkFilter(url, method, host);
 
@@ -369,81 +375,47 @@ public class BurpExtender implements BurpExtension {
                     return;
                 }
 
-                String requestKey = generateRequestKey(requestToBeSent);
+                String requestKey = generateRequestKey(request);
                 requestKeyToSequentialId.put(requestKey, sequentialId);
 
-                String requestMessage = String.format("%s%d\n%s", REQUEST_PREFIX, sequentialId, requestToBeSent.toString());
+                // 处理请求
+                String requestMessage = String.format("%s%d\n%s", REQUEST_PREFIX, sequentialId, request.toString());
                 logger.info("Processing request: " + sequentialId);
                 logger.info(requestMessage);
 
-                pendingRequests.put(sequentialId, requestKey);
-
                 synchronized (persistentOutputStream) {
-                    persistentOutputStream.write(requestMessage.getBytes());
+                    persistentOutputStream.write(requestMessage.getBytes(StandardCharsets.UTF_8));
                     persistentOutputStream.write(MESSAGE_SEPARATOR);
                     persistentOutputStream.flush();
                 }
 
-                requestResponseMap.put(requestKey, HttpRequestResponse.httpRequestResponse(requestToBeSent, null));
+                // 如果有响应，处理响应
+                if (response != null) {
+                    int statusCode = response.statusCode();
+                    
+                    if (checkFilter(statusCode)) {
+                        logger.info("Response filtered: " + sequentialId);
+                        return;
+                    }
+
+                    String responseMessage = String.format("%s%d\n%s", RESPONSE_PREFIX, sequentialId, response.toString());
+                    logger.info("Processing response: " + sequentialId);
+                    logger.info(responseMessage);
+
+                    synchronized (persistentOutputStream) {
+                        persistentOutputStream.write(responseMessage.getBytes(StandardCharsets.UTF_8));
+                        persistentOutputStream.write(MESSAGE_SEPARATOR);
+                        persistentOutputStream.flush();
+                    }
+                }
+
+                // 保存请求-响应对
+                requestResponseMap.put(requestKey, capture);
+
             } catch (Exception e) {
-                logger.log(Level.SEVERE, "处理请求时出错", e);
+                logger.log(Level.SEVERE, "处理HTTP请求-响应对时出错", e);
             }
         });
-    }
-
-    private void processResponse(HttpResponseReceived responseReceived) {
-        if (!isRunning || persistentSocket == null || persistentSocket.isClosed()) return;
-
-        executorService.submit(() -> {
-            try {
-                logger.info("Received response: " + responseReceived.statusCode());
-                int statusCode = responseReceived.statusCode();
-                String requestKey = generateRequestKey(responseReceived.initiatingRequest());
-                Integer sequentialId = requestKeyToSequentialId.get(requestKey);
-
-                if (sequentialId == null) {
-                    logger.warning("未找到匹配的请求ID: " + requestKey);
-                    return;
-                }
-
-                if (checkFilter(statusCode)) {
-                    logger.info("Response filtered: " + sequentialId);
-                    return;
-                }
-
-                String responseMessage = String.format("%s%d\n%s", RESPONSE_PREFIX, sequentialId, responseReceived.toString());
-                logger.info("Processing response: " + sequentialId);
-                logger.info(responseMessage);
-
-                synchronized (persistentOutputStream) {
-                    persistentOutputStream.write(responseMessage.getBytes());
-                    persistentOutputStream.write(MESSAGE_SEPARATOR);
-                    persistentOutputStream.flush();
-                }
-
-                pendingRequests.remove(sequentialId);
-
-                HttpRequestResponse existingRequestResponse = requestResponseMap.get(requestKey);
-                if (existingRequestResponse != null) {
-                    HttpRequestResponse updatedRequestResponse = HttpRequestResponse.httpRequestResponse(
-                        existingRequestResponse.request(),
-                        responseReceived
-                    );
-                    requestResponseMap.put(requestKey, updatedRequestResponse);
-                }
-            } catch (Exception e) {
-                logger.log(Level.SEVERE, "处理响应时出错", e);
-            }
-        });
-    }
-
-    private void checkUnmatchedRequests() {
-        scheduledExecutorService.scheduleAtFixedRate(() -> {
-            logger.info("Checking unmatched requests...");
-            for (Map.Entry<Integer, String> entry : pendingRequests.entrySet()) {
-                logger.warning("Unmatched request: " + entry.getKey());
-            }
-        }, 0, 1, TimeUnit.MINUTES);
     }
 
     private boolean checkFilter(String url, String method, String host) {
@@ -500,34 +472,10 @@ public class BurpExtender implements BurpExtension {
         return false;
     }
 
-    private String readLine(InputStream is) throws IOException {
-        StringBuilder sb = new StringBuilder();
-        int c;
-        while ((c = is.read()) != -1) {
-            if (c == '\n') {
-                break;
-            }
-            sb.append((char) c);
-        }
-        return sb.length() > 0 ? sb.toString() : null;
-    }
-
-    private boolean endsWith(byte[] array, byte[] suffix) {
-        if (array.length < suffix.length) {
-            return false;
-        }
-        for (int i = 0; i < suffix.length; i++) {
-            if (array[array.length - suffix.length + i] != suffix[i]) {
-                return false;
-            }
-        }
-        return true;
-    }
-
     private String generateRequestKey(HttpRequest request) {
         String timestamp = String.valueOf(System.currentTimeMillis());
         String uuid = UUID.randomUUID().toString();
-        String bodyHash = calculateBodyHash(request);
+        String bodyHash = calculateBodyHash(request.body());
         
         return request.method() + "|" + 
                request.url() + "|" + 
@@ -538,10 +486,10 @@ public class BurpExtender implements BurpExtension {
                bodyHash;
     }
 
-    private String calculateBodyHash(HttpRequest request) {
+    private String calculateBodyHash(ByteArray body) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            byte[] encodedHash = digest.digest(request.body().getBytes());
+            byte[] encodedHash = digest.digest(body.getBytes());
             return bytesToHex(encodedHash);
         } catch (NoSuchAlgorithmException e) {
             logger.log(Level.WARNING, "计算请求体哈希时出错", e);
@@ -561,25 +509,16 @@ public class BurpExtender implements BurpExtension {
         return hexString.toString();
     }
 
-    private List<String> getAllMessages() {
-        List<String> allMessages = new ArrayList<>();
-        for (Map.Entry<String, HttpRequestResponse> entry : requestResponseMap.entrySet()) {
-            HttpRequestResponse requestResponse = entry.getValue();
-            Integer sequentialId = requestKeyToSequentialId.get(entry.getKey());
-            if (sequentialId != null) {
-                allMessages.add(String.format("%s%d\n%s", REQUEST_PREFIX, sequentialId, requestResponse.request().toString()));
-                if (requestResponse.response() != null) {
-                    allMessages.add(String.format("%s%d\n%s", RESPONSE_PREFIX, sequentialId, requestResponse.response().toString()));
-                }
-            }
-        }
-        return allMessages;
-    }
-
     private void showAllMessages() {
         StringBuilder sb = new StringBuilder();
-        for (String message : getAllMessages()) {
-            sb.append(message).append("\n");
+        for (LoggerCaptureHttpRequestResponse capture : requestResponseMap.values()) {
+            Integer sequentialId = requestKeyToSequentialId.get(generateRequestKey(capture.request()));
+            if (sequentialId != null) {
+                sb.append(String.format("%s%d\n%s", REQUEST_PREFIX, sequentialId, capture.request().toString())).append("\n");
+                if (capture.response() != null) {
+                    sb.append(String.format("%s%d\n%s", RESPONSE_PREFIX, sequentialId, capture.response().toString())).append("\n");
+                }
+            }
         }
         JTextArea textArea = new JTextArea(sb.toString());
         JScrollPane scrollPane = new JScrollPane(textArea);
@@ -680,10 +619,6 @@ public class BurpExtender implements BurpExtension {
 
         public String getProperty(String key, String defaultValue) {
             return config.getProperty(key, defaultValue);
-        }
-
-        public String getProperty(String key) {
-            return config.getProperty(key);
         }
 
         public void setProperty(String key, String value) {
