@@ -60,7 +60,6 @@ public class BurpExtender implements BurpExtension {
     private final ConcurrentHashMap<String, HttpRequestResponse> requestResponseMap = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Integer> requestKeyToSequentialId = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<Integer, String> pendingRequests = new ConcurrentHashMap<>();
-    private final BlockingQueue<String> messageQueue = new LinkedBlockingQueue<>();
 
     @Override
     public void initialize(MontoyaApi api) {
@@ -87,8 +86,6 @@ public class BurpExtender implements BurpExtension {
                 return ResponseReceivedAction.continueWith(responseReceived);
             }
         });
-
-        new Thread(this::handleForwardedMessages).start();
     }
 
     private void initializeUI() {
@@ -365,7 +362,7 @@ public class BurpExtender implements BurpExtension {
                 requestKeyToSequentialId.put(requestKey, sequentialId);
 
                 String requestMessage = String.format("%s%d\n%s", REQUEST_PREFIX, sequentialId, requestToBeSent.toString());
-                messageQueue.put(requestMessage);
+                logger.info(requestMessage);
 
                 pendingRequests.put(sequentialId, requestKey);
 
@@ -387,6 +384,7 @@ public class BurpExtender implements BurpExtension {
 
         executorService.submit(() -> {
             try {
+                logger.info("Received response: " + responseReceived.statusCode());
                 int statusCode = responseReceived.statusCode();
                 String requestKey = generateRequestKey(responseReceived.initiatingRequest());
                 Integer sequentialId = requestKeyToSequentialId.get(requestKey);
@@ -401,7 +399,7 @@ public class BurpExtender implements BurpExtension {
                 }
 
                 String responseMessage = String.format("%s%d\n%s", RESPONSE_PREFIX, sequentialId, responseReceived.toString());
-                messageQueue.put(responseMessage);
+                logger.info(responseMessage);
 
                 synchronized (persistentOutputStream) {
                     persistentOutputStream.write(responseMessage.getBytes());
@@ -423,19 +421,6 @@ public class BurpExtender implements BurpExtension {
                 logger.log(Level.SEVERE, "处理响应时出错", e);
             }
         });
-    }
-
-    private void handleForwardedMessages() {
-        while (isRunning) {
-            try {
-                String message = messageQueue.take();
-                logger.info(message);
-            } catch (InterruptedException e) {
-                if (isRunning) {
-                    logger.log(Level.SEVERE, "处理转发消息时出错", e);
-                }
-            }
-        }
     }
 
     private boolean checkFilter(String url, String method, String host) {
@@ -551,6 +536,21 @@ public class BurpExtender implements BurpExtension {
             hexString.append(hex);
         }
         return hexString.toString();
+    }
+
+    public List<String> getAllMessages() {
+        List<String> allMessages = new ArrayList<>();
+        for (Map.Entry<String, HttpRequestResponse> entry : requestResponseMap.entrySet()) {
+            HttpRequestResponse requestResponse = entry.getValue();
+            Integer sequentialId = requestKeyToSequentialId.get(entry.getKey());
+            if (sequentialId != null) {
+                allMessages.add(String.format("%s%d\n%s", REQUEST_PREFIX, sequentialId, requestResponse.request().toString()));
+                if (requestResponse.response() != null) {
+                    allMessages.add(String.format("%s%d\n%s", RESPONSE_PREFIX, sequentialId, requestResponse.response().toString()));
+                }
+            }
+        }
+        return allMessages;
     }
 
     private class ConfigManager {
