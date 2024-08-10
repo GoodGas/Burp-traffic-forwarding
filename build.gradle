@@ -7,7 +7,7 @@ repositories {
 }
 
 dependencies {
-    implementation 'net.portswigger.burp.extensions:montoya-api:2023.9'
+    implementation 'net.portswigger.burp.extensions:montoya-api:2024.1.1'
 }
 
 jar {
